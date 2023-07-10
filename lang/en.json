@@ -1,0 +1,20 @@
+{
+    "start": "Welcome using <b>Unpin Bot</b>!\n\nThis bot is used to automatically unpin channel post forwarded into connected discussion group. To ensure its proper functionality, please give the bot permission to pin messages. \n\nUse /help for user instructions.",
+    "help": "Help info:\n/start About this bot\n/help Show help info\n/enable Enable unpin\n/disable Disable unpin\n",
+    "enable": "Successfully enabled.",
+    "disable": "Successfully disabled.",
+    "error": {
+        "not_group": "Please use this bot in discussion groups.",
+        "not_admin": "Only administrator can do that.",
+        "require_rights": "Failed to enable. Require permission to pin messages.",
+        "already_enabled": "Already enabled.",
+        "already_disabled": "Already disabled."
+    },
+    "cmd": {
+        "start": "About this bot",
+        "help": "Show help info",
+        "enable": "Enable unpin",
+        "disable": "Disable unpin"
+    },
+    "description": "Unpin channel post forwarded into connected discussion group automatically."
+}

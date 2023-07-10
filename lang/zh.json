@@ -1,0 +1,20 @@
+{
+    "start": "欢迎使用 <b>Unpin Bot</b>!\n\n此 Bot 用于自动解除群组内关联频道消息置顶。为保证正常工作，请给予置顶权限。\n\n使用 /help 查看帮助信息。",
+    "help": "帮助信息：\n/start 关于本 Bot\n/help 显示帮助信息\n/enable 启用解除置顶\n/disable 停用解除置顶\n",
+    "enable": "启用成功。",
+    "disable": "停用成功。",
+    "error": {
+        "not_group": "请在群组中使用本 Bot。",
+        "not_admin": "仅管理员能进行此操作。",
+        "require_rights": "启用失败。无置顶权限。",
+        "already_enabled": "当前已启用。",
+        "already_disabled": "当前已停用。"
+    },
+    "cmd": {
+        "start": "关于本 Bot",
+        "help": "显示帮助信息",
+        "enable": "启用解除置顶",
+        "disable": "停用解除置顶"
+    },
+    "description": "自动解除群组内关联频道消息置顶"
+}
