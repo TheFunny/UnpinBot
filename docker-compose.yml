@@ -1,0 +1,11 @@
+version: '3'
+services:
+  unpin:
+    build: .
+    restart: always
+    environment:
+      LOCAL_USER_ID: '1000'
+    volumes:
+      - ./pers_data:/app/pers_data
+      - ./config.json:/app/config.json
+    container_name: unpin
