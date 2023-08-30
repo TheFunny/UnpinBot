@@ -12,6 +12,7 @@ A Telegram bot to automatically unpin channel post forwarded into connected disc
 
 1. Create a new bot using @BotFather. Save the token as it's required later.
 2. Clone this responsory.
+3. Copy `config.json.example` to `config.json` and edit it. Put you bot token from @BotFather into `token`. Change `lang` if you want.
 
 ### Docker Compose
 
@@ -26,5 +27,4 @@ A Telegram bot to automatically unpin channel post forwarded into connected disc
 
 0. Install `Python` with `pip`.
 1. `cd` to cloned directory and run `pip install -r requirements.txt`.
-2. Copy `config.json.example` to `config.json` and edit it. Put you bot token from @BotFather into `token`. Change `lang` if you want.
-3. Run `python main.py`.
+2. Run `python main.py`.
