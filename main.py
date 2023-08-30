@@ -1,7 +1,7 @@
 import json
 import logging
 import asyncio
-from telegram import Update, BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllChatAdministrators, ChatAdministratorRights
+from telegram import Update, BotCommand, BotCommandScope, BotCommandScopeAllGroupChats, BotCommandScopeAllChatAdministrators, ChatAdministratorRights
 from telegram.constants import ParseMode, ChatAction, ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
@@ -88,7 +88,8 @@ async def unpin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await retry_on_error(update.effective_message.unpin, retry=3)
 
 
-async def retry_on_error(func, wait=0.1, retry=0, *args, **kwargs): # unsure if this can solve the problem
+# unsure if this can solve the problem
+async def retry_on_error(func, wait=0.1, retry=0, *args, **kwargs):
     for i in range(retry):
         try:
             return await func(*args, **kwargs)
@@ -109,8 +110,8 @@ async def post_init(application: Application) -> None:
         BotCommand('enable', text["cmd"]["enable"]),
         BotCommand('disable', text["cmd"]["disable"])
     ]
-    await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats)
-    await application.bot.set_my_commands(commands + commands_admin, scope=BotCommandScopeAllChatAdministrators)
+    await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
+    await application.bot.set_my_commands(commands + commands_admin, scope=BotCommandScopeAllChatAdministrators())
     await application.bot.set_my_description(text["description"])
     await application.bot.set_my_short_description(text["description"])
 
