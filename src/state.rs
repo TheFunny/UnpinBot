@@ -30,7 +30,14 @@ impl EnabledChats {
                     .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
                 file.enabled_chats.into_iter().map(ChatId).collect()
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+            // A path component is a file, so `save()` can still create the
+            // real directories later; treat it like a missing file. Windows
+            // reports kind NotFound (raw 3), so the arm above already covers
+            // it; Linux ENOTDIR has no io::ErrorKind at MSRV 1.82 — match it
+            // by raw code 20.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20) => {
+                HashSet::new()
+            }
             Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
         };
         Ok(Self {
@@ -206,7 +213,7 @@ mod tests {
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, "x").unwrap();
         let bad_path = blocker.join("deep/state.json");
-        let app = AppState::new(EnabledChats::load(&bad_path).unwrap());
+        let app = AppState::new(EnabledChats::load(&bad_path).expect("ENOTDIR loads as empty"));
         assert!(app.insert_and_save(ChatId(9)).is_err());
         // Rollback: in-memory set must not contain the chat.
         assert!(!app.contains(ChatId(9)));
