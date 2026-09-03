@@ -24,6 +24,7 @@ RUN find src -type f -name '*.rs' -exec touch {} + \
 
 FROM alpine:3.20
 RUN apk add --no-cache su-exec
+WORKDIR /app
 COPY --from=build /unpinbot /app/unpinbot
 COPY docker-entrypoint.sh /app/
 RUN chmod a+x /app/docker-entrypoint.sh

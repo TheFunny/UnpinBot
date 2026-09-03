@@ -23,12 +23,17 @@ if [ "$(id -u)" = "0" ]; then
     # — surface that loudly instead of failing later with a cryptic EACCES
     # from the bot itself.
     mkdir -p /app/pers_data 2>/dev/null || true
-    if ! chown -R "$UID_" /app/pers_data 2>/dev/null; then
+    # chown BOTH owner and group: `chown 1000 dir` leaves the group as-is
+    # (typically root/0 on bind mounts). The numeric-uid form of `su-exec`
+    # re-looks-up the passwd entry (getpwuid), so the process runs as
+    # unpin = 1000:1000 either way; the explicit user:group form is kept so
+    # it does not depend on the passwd entry existing.
+    if ! chown -R "$UID_:$UID_" /app/pers_data 2>/dev/null; then
         echo "entrypoint: WARNING: chown /app/pers_data failed;" >&2
         echo "  the bot may be unable to persist state. Fix on the host:" >&2
-        echo "  sudo chown -R $UID_ \$(pwd)/pers_data" >&2
+        echo "  sudo chown -R $UID_:$UID_ \$(pwd)/pers_data" >&2
     fi
 
-    exec su-exec "$UID_" "$@"
+    exec su-exec "$UID_:$UID_" "$@"
 fi
 exec "$@"
