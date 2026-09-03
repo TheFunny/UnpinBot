@@ -1,0 +1,66 @@
+name: Docker
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+
+env:
+  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/unpinbot
+
+jobs:
+  # A tag push and a branch push to the same commit fire two workflow runs;
+  # build only once. Tag runs always build; master runs build only when the
+  # pushed commit is not already tagged (the tag run covers it).
+  should-build:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "branch" ] && git tag --points-at "$GITHUB_SHA" | grep -q .; then
+            echo "commit already tagged; the tag run builds the image"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  docker:
+    needs: should-build
+    if: needs.should-build.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_REPO }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Fixed scope: the gha backend defaults to the current git ref, which
+          # would give every new tag a cold cache on release builds. mode=max
+          # keeps every stage's layers (deps layer included).
+          cache-from: type=gha,scope=unpinbot-build
+          cache-to: type=gha,mode=max,scope=unpinbot-build

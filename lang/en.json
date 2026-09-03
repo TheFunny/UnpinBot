@@ -8,7 +8,8 @@
         "not_admin": "Only administrator can do that.",
         "require_rights": "Failed to enable. Require permission to pin messages.",
         "already_enabled": "Already enabled.",
-        "already_disabled": "Already disabled."
+        "already_disabled": "Already disabled.",
+        "retry_later": "Something went wrong, please try again later."
     },
     "cmd": {
         "start": "About this bot",

@@ -1,2 +1,7 @@
+/target
+.env
 config.json
 pers_data
+__pycache__/
+*.pyc
+.omp/
