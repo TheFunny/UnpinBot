@@ -16,6 +16,7 @@ RUN mkdir -p src \
 #    forcing a rebuild of just this crate while the dependency layer stays
 #    cached. (`cargo clean -p` does NOT work here — it removes 0 files and the
 #    stub binary silently ships.)
+COPY lang/ ./lang/
 COPY src/ ./src/
 RUN find src -type f -name '*.rs' -exec touch {} + \
     && cargo build --release \

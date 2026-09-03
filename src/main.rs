@@ -198,6 +198,8 @@ async fn run() {
     // Ctrl+C does. Windows has no SIGTERM; ctrlc handles Ctrl+C there.
     #[cfg(unix)]
     {
+        use teloxide::update_listeners::UpdateListener as _;
+
         let stop_token = polling.stop_token();
         tokio::spawn(async move {
             let mut sigterm =
