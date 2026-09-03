@@ -16,9 +16,19 @@ if [ "$(id -u)" = "0" ]; then
     else
         adduser -D -H -u "$UID_" -s /sbin/nologin unpin 2>/dev/null || true
     fi
-    # Bind-mounted volumes may not support chown; that must not kill the
-    # container either.
-    chown -R "$UID_" /app/pers_data 2>/dev/null || true
+
+    # The state volume must be writable by the runtime user. Ensure the
+    # directory exists first (the mount point exists by compose definition),
+    # then chown it. Bind mounts on restrictive filesystems may refuse chown
+    # — surface that loudly instead of failing later with a cryptic EACCES
+    # from the bot itself.
+    mkdir -p /app/pers_data 2>/dev/null || true
+    if ! chown -R "$UID_" /app/pers_data 2>/dev/null; then
+        echo "entrypoint: WARNING: chown /app/pers_data failed;" >&2
+        echo "  the bot may be unable to persist state. Fix on the host:" >&2
+        echo "  sudo chown -R $UID_ \$(pwd)/pers_data" >&2
+    fi
+
     exec su-exec "$UID_" "$@"
 fi
 exec "$@"
