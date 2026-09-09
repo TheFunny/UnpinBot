@@ -13,7 +13,6 @@ All settings are passed via environment variables:
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `TELOXIDE_TOKEN` | yes | — | Bot token from @BotFather |
-| `UNPINBOT_LANG` | no | `en` | UI language, `en` or `zh` |
 | `UNPINBOT_STATE_PATH` | no | `pers_data/state.json` | Enabled-chats state file |
 | `RUST_LOG` | no | `warn` | Log level (`info`, `debug`, ...) |
 | `LOCAL_USER_ID` | no | `9001` | UID to run as inside the container (Docker only) |
@@ -59,6 +58,8 @@ cargo run --release
 - `/start`, `/help` — about and help
 
 Enabled chats are persisted in `pers_data/state.json` and survive restarts. If you are upgrading from an old Python-based release, the old state cannot be migrated — run `/enable` again in each group.
+
+The bot follows each sender's Telegram client language automatically (English and Chinese; English is the fallback). Command menus and the bot description match the client language too.
 
 ## CI
 

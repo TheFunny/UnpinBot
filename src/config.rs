@@ -7,8 +7,6 @@ use std::path::PathBuf;
 pub struct Config {
     /// Bot token from @BotFather, read from `TELOXIDE_TOKEN` (required).
     pub token: String,
-    /// UI language: `"en"` or `"zh"`, read from `UNPINBOT_LANG` (default `"en"`).
-    pub lang: String,
     /// Enabled-state file, read from `UNPINBOT_STATE_PATH`
     /// (default `pers_data/state.json`).
     pub state_path: PathBuf,
@@ -39,7 +37,6 @@ impl Config {
     pub fn from_env() -> Result<Config, String> {
         Ok(Config {
             token: non_empty("TELOXIDE_TOKEN")?,
-            lang: defaulted("UNPINBOT_LANG", "en"),
             state_path: PathBuf::from(defaulted("UNPINBOT_STATE_PATH", DEFAULT_STATE_PATH)),
         })
     }
@@ -79,10 +76,8 @@ mod tests {
     fn defaults_apply_when_unset() {
         with_env(|| {
             std::env::set_var("TELOXIDE_TOKEN", "123:abc");
-            std::env::remove_var("UNPINBOT_LANG");
             std::env::remove_var("UNPINBOT_STATE_PATH");
             let cfg = Config::from_env().expect("valid config");
-            assert_eq!(cfg.lang, "en");
             assert_eq!(cfg.state_path, PathBuf::from("pers_data/state.json"));
         });
     }
@@ -91,10 +86,8 @@ mod tests {
     fn overrides_apply_when_set() {
         with_env(|| {
             std::env::set_var("TELOXIDE_TOKEN", "123:abc");
-            std::env::set_var("UNPINBOT_LANG", "zh");
             std::env::set_var("UNPINBOT_STATE_PATH", "custom/state.json");
             let cfg = Config::from_env().expect("valid config");
-            assert_eq!(cfg.lang, "zh");
             assert_eq!(cfg.state_path, PathBuf::from("custom/state.json"));
         });
     }

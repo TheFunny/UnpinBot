@@ -15,7 +15,6 @@ use teloxide::types::{BotCommand, BotCommandScope, ChatAdministratorRights, Pars
 use teloxide::update_listeners::Polling;
 
 use config::Config;
-use i18n::Lang;
 use state::{AppState, EnabledChats};
 use unpin::with_retry;
 
@@ -48,7 +47,7 @@ fn fatal(msg: String) -> ! {
 /// Registers the bot's default admin rights, commands, and description.
 /// Failures here are logged but not fatal: the core unpin loop does not
 /// depend on them.
-async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
+async fn setup_bot_profile(bot: &Bot, catalogs: &i18n::Catalogs) {
     let rights = ChatAdministratorRights {
         is_anonymous: false,
         can_manage_chat: false,
@@ -76,6 +75,69 @@ async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
         log::error!("set_my_default_administrator_rights failed: {e}");
     }
 
+    // Register profile data once without a language code (the default shown
+    // to users whose language has no dedicated variant) and once per
+    // supported language; Telegram then serves the variant matching the
+    // user's client language automatically.
+    for code in i18n::SUPPORTED {
+        let lang = catalogs.resolve(Some(code));
+        let basic = vec![
+            BotCommand::new("start", lang.cmd.start.clone()),
+            BotCommand::new("help", lang.cmd.help.clone()),
+        ];
+        let admin = [
+            BotCommand::new("enable", lang.cmd.enable.clone()),
+            BotCommand::new("disable", lang.cmd.disable.clone()),
+        ];
+
+        if let Err(e) = with_retry(|| {
+            bot.set_my_commands(basic.clone())
+                .scope(BotCommandScope::AllGroupChats)
+                .language_code(code)
+                .send()
+        })
+        .await
+        {
+            log::error!("set_my_commands(AllGroupChats, {code}) failed: {e}");
+        }
+        let mut admin_cmds = basic.clone();
+        admin_cmds.extend_from_slice(&admin);
+        if let Err(e) = with_retry(|| {
+            bot.set_my_commands(admin_cmds.clone())
+                .scope(BotCommandScope::AllChatAdministrators)
+                .language_code(code)
+                .send()
+        })
+        .await
+        {
+            log::error!("set_my_commands(AllChatAdministrators, {code}) failed: {e}");
+        }
+
+        if let Err(e) = with_retry(|| {
+            bot.set_my_description()
+                .description(lang.description.clone())
+                .language_code(code)
+                .send()
+        })
+        .await
+        {
+            log::error!("set_my_description({code}) failed: {e}");
+        }
+        if let Err(e) = with_retry(|| {
+            bot.set_my_short_description()
+                .short_description(lang.description.clone())
+                .language_code(code)
+                .send()
+        })
+        .await
+        {
+            log::error!("set_my_short_description({code}) failed: {e}");
+        }
+    }
+
+    // Default (no language_code) variants: shown to users whose client
+    // language has no dedicated variant above.
+    let lang = catalogs.resolve(None);
     let basic = vec![
         BotCommand::new("start", lang.cmd.start.clone()),
         BotCommand::new("help", lang.cmd.help.clone()),
@@ -84,7 +146,6 @@ async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
         BotCommand::new("enable", lang.cmd.enable.clone()),
         BotCommand::new("disable", lang.cmd.disable.clone()),
     ];
-
     if let Err(e) = with_retry(|| {
         bot.set_my_commands(basic.clone())
             .scope(BotCommandScope::AllGroupChats)
@@ -92,7 +153,7 @@ async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
     })
     .await
     {
-        log::error!("set_my_commands(AllGroupChats) failed: {e}");
+        log::error!("set_my_commands(AllGroupChats, default) failed: {e}");
     }
     let mut admin_cmds = basic.clone();
     admin_cmds.extend_from_slice(&admin);
@@ -103,9 +164,8 @@ async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
     })
     .await
     {
-        log::error!("set_my_commands(AllChatAdministrators) failed: {e}");
+        log::error!("set_my_commands(AllChatAdministrators, default) failed: {e}");
     }
-
     if let Err(e) = with_retry(|| {
         bot.set_my_description()
             .description(lang.description.clone())
@@ -113,7 +173,7 @@ async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
     })
     .await
     {
-        log::error!("set_my_description failed: {e}");
+        log::error!("set_my_description(default) failed: {e}");
     }
     if let Err(e) = with_retry(|| {
         bot.set_my_short_description()
@@ -122,15 +182,25 @@ async fn setup_bot_profile(bot: &Bot, lang: &Lang) {
     })
     .await
     {
-        log::error!("set_my_short_description failed: {e}");
+        log::error!("set_my_short_description(default) failed: {e}");
     }
 }
 
 fn build_handler(
+    catalogs: &'static i18n::Catalogs,
 ) -> dptree::Handler<'static, ResponseResult<()>, teloxide::dispatching::DpHandlerDescription> {
-    // Commands: `Update::filter_message()` injects `Message`, then
-    // `filter_command` consumes it (official teloxide pattern).
+    // Commands: `Update::filter_message()` injects `Message`, resolve the
+    // sender's language into the chain (overwriting nothing: `Lang` is not a
+    // static dependency), then `filter_command` consumes the `Message`
+    // (official teloxide pattern).
     let command_branch = Update::filter_message()
+        .filter_map(move |msg: Message| {
+            Some(
+                catalogs
+                    .resolve(msg.from.as_ref().and_then(|u| u.language_code.as_deref()))
+                    .clone(),
+            )
+        })
         .filter_command::<commands::Command>()
         .endpoint(commands::route_command);
 
@@ -160,9 +230,11 @@ async fn run() {
         Ok(c) => c,
         Err(e) => fatal(e),
     };
-    let lang = match i18n::load(&cfg.lang) {
-        Ok(l) => l,
-        Err(e) => fatal(e),
+    static CATALOGS: std::sync::LazyLock<Result<i18n::Catalogs, String>> =
+        std::sync::LazyLock::new(i18n::Catalogs::load);
+    let catalogs: &i18n::Catalogs = match &*CATALOGS {
+        Ok(c) => c,
+        Err(e) => fatal(e.clone()),
     };
     let chats = match EnabledChats::load(&cfg.state_path) {
         Ok(c) => c,
@@ -182,7 +254,7 @@ async fn run() {
         me.user.username.as_deref().unwrap_or("?")
     );
 
-    setup_bot_profile(&bot, &lang).await;
+    setup_bot_profile(&bot, catalogs).await;
 
     #[allow(unused_mut)]
     let mut polling = Polling::builder(bot.clone())
@@ -216,9 +288,9 @@ async fn run() {
         });
     }
 
-    let handler = build_handler();
+    let handler = build_handler(catalogs);
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![state, lang])
+        .dependencies(dptree::deps![state])
         .default_handler(|upd| async move {
             log::trace!("skipped update: {upd:?}");
         })

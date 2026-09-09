@@ -4,7 +4,6 @@ services:
     restart: always
     environment:
       TELOXIDE_TOKEN: ${TELOXIDE_TOKEN}
-      # UNPINBOT_LANG: zh
       # UNPINBOT_STATE_PATH: pers_data/state.json
       # RUST_LOG: info
       LOCAL_USER_ID: '1000'

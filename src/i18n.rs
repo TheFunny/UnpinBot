@@ -34,18 +34,39 @@ pub struct Commands {
 const EN: &str = include_str!("../lang/en.json");
 const ZH: &str = include_str!("../lang/zh.json");
 
-/// Loads the catalog for `lang`. Unknown languages are a startup error.
-pub fn load(lang: &str) -> Result<Lang, String> {
-    let raw = match lang {
-        "en" => EN,
-        "zh" => ZH,
-        other => {
-            return Err(format!(
-                "unsupported UNPINBOT_LANG {other:?} (supported: en, zh)"
-            ))
+/// Languages with embedded catalogs, lowercase ISO 639-1 codes.
+pub const SUPPORTED: [&str; 2] = ["en", "zh"];
+
+/// Language used when the sender's language is unknown or unsupported.
+pub const FALLBACK: &str = "en";
+
+/// Both embedded catalogs, loaded once at startup.
+pub struct Catalogs {
+    en: Lang,
+    zh: Lang,
+}
+
+impl Catalogs {
+    /// Parses both embedded catalogs. A parse failure is a startup error.
+    pub fn load() -> Result<Self, String> {
+        let en: Lang = serde_json::from_str(EN)
+            .map_err(|e| format!("built-in en language file is invalid: {e}"))?;
+        let zh: Lang = serde_json::from_str(ZH)
+            .map_err(|e| format!("built-in zh language file is invalid: {e}"))?;
+        Ok(Self { en, zh })
+    }
+
+    /// Picks the catalog for an IETF language tag: the primary subtag
+    /// (`zh-Hans-CN` -> `zh`) is matched against [`SUPPORTED`]; anything
+    /// else falls back to [`FALLBACK`].
+    pub fn resolve(&self, code: Option<&str>) -> &Lang {
+        let Some(code) = code else { return &self.en };
+        let primary = code.split('-').next().unwrap_or(FALLBACK).to_lowercase();
+        match primary.as_str() {
+            "zh" => &self.zh,
+            _ => &self.en,
         }
-    };
-    serde_json::from_str(raw).map_err(|e| format!("built-in {lang} language file is invalid: {e}"))
+    }
 }
 
 #[cfg(test)]
@@ -54,7 +75,8 @@ mod tests {
 
     #[test]
     fn english_catalog_is_complete() {
-        let lang = load("en").expect("en parses");
+        let catalogs = Catalogs::load().expect("catalogs parse");
+        let lang = &catalogs.en;
         assert!(!lang.start.is_empty());
         assert!(!lang.help.is_empty());
         assert!(!lang.enable.is_empty());
@@ -78,7 +100,8 @@ mod tests {
 
     #[test]
     fn chinese_catalog_is_complete() {
-        let lang = load("zh").expect("zh parses");
+        let catalogs = Catalogs::load().expect("catalogs parse");
+        let lang = &catalogs.zh;
         assert!(!lang.start.is_empty());
         assert!(!lang.help.is_empty());
         assert!(!lang.enable.is_empty());
@@ -101,8 +124,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_language_is_rejected() {
-        let err = load("fr").unwrap_err();
-        assert!(err.contains("en, zh"));
+    fn resolve_matches_primary_subtag_with_fallback() {
+        let catalogs = Catalogs::load().expect("catalogs parse");
+        assert_eq!(catalogs.resolve(None).start, catalogs.en.start);
+        assert_eq!(
+            catalogs.resolve(Some("zh-Hans-CN")).start,
+            catalogs.zh.start
+        );
+        assert_eq!(catalogs.resolve(Some("en-US")).start, catalogs.en.start);
+        assert_eq!(catalogs.resolve(Some("pt-BR")).start, catalogs.en.start);
     }
 }
