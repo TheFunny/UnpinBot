@@ -55,12 +55,11 @@ cargo run --release
 
 - `/enable` — enable auto-unpin in the current group (administrator only; the bot needs the pin-messages permission)
 - `/disable` — disable auto-unpin
-  - Both accept anonymous group administrators (sending as the group itself).
 - `/start`, `/help` — about and help
 
 Enabled chats are persisted in `pers_data/state.json` and survive restarts. If you are upgrading from an old Python-based release, the old state cannot be migrated — run `/enable` again in each group.
 
-The bot follows each sender's Telegram client language automatically (English and Chinese; English is the fallback). Command menus and the bot description match the client language too — no configuration needed. Anonymous group administrators (sending as the group) can run admin commands; their replies use the fallback language.
+The bot follows each sender's Telegram client language automatically (English and Chinese; English is the fallback). Command menus and the bot description match the client language too — no configuration needed.
 
 ## CI
 
