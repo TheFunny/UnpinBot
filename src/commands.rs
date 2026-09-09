@@ -1,7 +1,7 @@
 //! `/start` `/help` `/enable` `/disable` command handlers.
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatType, ParseMode};
+use teloxide::types::{ChatAction, ChatType};
 use teloxide::utils::command::BotCommands;
 
 /// Maps a chat's public kind to the wire `ChatType` used by the predicate.
@@ -31,10 +31,7 @@ pub enum Command {
 }
 
 async fn reply(bot: &Bot, msg: &Message, text: &str) -> ResponseResult<()> {
-    bot.send_message(msg.chat.id, text)
-        .parse_mode(ParseMode::Html)
-        .send()
-        .await?;
+    bot.send_message(msg.chat.id, text).send().await?;
     Ok(())
 }
 
@@ -60,6 +57,15 @@ async fn ensure_group(bot: &Bot, msg: &Message, lang: &Lang) -> ResponseResult<b
 /// Rejects non-admin callers. `None` sender (anonymous group admin sends
 /// appear without a `from` user) is treated as not-admin.
 async fn ensure_caller_admin(bot: &Bot, msg: &Message, lang: &Lang) -> ResponseResult<bool> {
+    // Anonymous group admins send as GroupAnonymousBot with `sender_chat`
+    // set to the chat itself; there is no real user to look up.
+    if msg
+        .sender_chat
+        .as_ref()
+        .is_some_and(|c| c.id == msg.chat.id)
+    {
+        return Ok(true);
+    }
     let Some(from) = msg.from.as_ref() else {
         reply(bot, msg, &lang.error.not_admin).await?;
         return Ok(false);

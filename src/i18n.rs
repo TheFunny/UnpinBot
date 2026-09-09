@@ -79,8 +79,25 @@ mod tests {
     #[test]
     fn chinese_catalog_is_complete() {
         let lang = load("zh").expect("zh parses");
-        assert!(!lang.error.retry_later.is_empty());
-        assert!(!lang.cmd.enable.is_empty());
+        assert!(!lang.start.is_empty());
+        assert!(!lang.help.is_empty());
+        assert!(!lang.enable.is_empty());
+        assert!(!lang.disable.is_empty());
+        assert!(!lang.description.is_empty());
+        for s in [
+            &lang.error.not_group,
+            &lang.error.not_admin,
+            &lang.error.require_rights,
+            &lang.error.already_enabled,
+            &lang.error.already_disabled,
+            &lang.error.retry_later,
+            &lang.cmd.start,
+            &lang.cmd.help,
+            &lang.cmd.enable,
+            &lang.cmd.disable,
+        ] {
+            assert!(!s.is_empty());
+        }
     }
 
     #[test]

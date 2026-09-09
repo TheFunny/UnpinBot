@@ -241,6 +241,4 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
     rt.block_on(run());
-    // Silence unused warnings for types referenced only in tests.
-    let _ = teloxide::types::ChatType::Private;
 }
