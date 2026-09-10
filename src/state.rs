@@ -50,6 +50,10 @@ impl EnabledChats {
         self.chats.contains(&id)
     }
 
+    pub fn len(&self) -> usize {
+        self.chats.len()
+    }
+
     /// Adds `id`; returns whether it was newly added.
     pub fn insert(&mut self, id: ChatId) -> bool {
         self.chats.insert(id)
@@ -84,7 +88,13 @@ impl EnabledChats {
             serde_json::to_vec_pretty(&file).map_err(|e| format!("cannot serialize state: {e}"))?;
         fs::write(&tmp, bytes).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
         fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("cannot rename into {}: {e}", self.path.display()))
+            .map_err(|e| format!("cannot rename into {}: {e}", self.path.display()))?;
+        log::debug!(
+            "saved {} enabled chats to {}",
+            self.chats.len(),
+            self.path.display()
+        );
+        Ok(())
     }
 }
 

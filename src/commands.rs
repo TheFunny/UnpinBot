@@ -73,6 +73,7 @@ async fn ensure_caller_admin(bot: &Bot, msg: &Message, lang: &Lang) -> ResponseR
     match with_retry(|| bot.get_chat_member(msg.chat.id, from.id).send()).await {
         Ok(member) if is_privileged(&member) => Ok(true),
         Ok(_) => {
+            log::info!("user {} is not an admin in chat {}", from.id, msg.chat.id);
             reply(bot, msg, &lang.error.not_admin).await?;
             Ok(false)
         }
@@ -134,13 +135,23 @@ pub async fn enable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> Resp
         }
     };
     if !bot_can_unpin(chat_type_of(&msg.chat), &bot_member, default_permissions) {
+        log::info!(
+            "bot cannot unpin in chat {} (missing rights); /enable rejected",
+            msg.chat.id
+        );
         reply(&bot, &msg, &lang.error.require_rights).await?;
         return Ok(());
     }
 
     match state.insert_and_save(msg.chat.id) {
-        Ok(true) => reply(&bot, &msg, &lang.enable).await,
-        Ok(false) => reply(&bot, &msg, &lang.error.already_enabled).await,
+        Ok(true) => {
+            log::info!("chat {} enabled", msg.chat.id);
+            reply(&bot, &msg, &lang.enable).await
+        }
+        Ok(false) => {
+            log::info!("chat {} already enabled", msg.chat.id);
+            reply(&bot, &msg, &lang.error.already_enabled).await
+        }
         Err(e) => {
             log::error!(
                 "failed to persist enabled state for chat {}: {e}",
@@ -162,8 +173,14 @@ pub async fn disable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> Res
     }
 
     match state.remove_and_save(msg.chat.id) {
-        Ok(true) => reply(&bot, &msg, &lang.disable).await,
-        Ok(false) => reply(&bot, &msg, &lang.error.already_disabled).await,
+        Ok(true) => {
+            log::info!("chat {} disabled", msg.chat.id);
+            reply(&bot, &msg, &lang.disable).await
+        }
+        Ok(false) => {
+            log::info!("chat {} already disabled", msg.chat.id);
+            reply(&bot, &msg, &lang.error.already_disabled).await
+        }
         Err(e) => {
             log::error!(
                 "failed to persist disabled state for chat {}: {e}",
@@ -183,6 +200,15 @@ pub async fn route_command(
     lang: Lang,
     state: AppState,
 ) -> ResponseResult<()> {
+    let sender = msg
+        .from
+        .as_ref()
+        .map_or_else(|| "<anon>".to_owned(), |u| u.id.0.to_string());
+    log::info!(
+        "command {:?} from user {sender} in chat {}",
+        cmd,
+        msg.chat.id
+    );
     match cmd {
         Command::Start => start(bot, msg, lang).await,
         Command::Help => help(bot, msg, lang).await,

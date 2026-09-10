@@ -240,6 +240,11 @@ async fn run() {
         Ok(c) => c,
         Err(e) => fatal(e),
     };
+    log::info!(
+        "loaded {} enabled chats from {}",
+        chats.len(),
+        cfg.state_path.display()
+    );
     let state = AppState::new(chats);
     let bot = make_bot(&cfg);
 
@@ -303,6 +308,7 @@ async fn run() {
             ),
         )
         .await;
+    log::info!("dispatcher stopped");
 }
 
 fn main() {

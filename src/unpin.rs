@@ -85,8 +85,14 @@ pub fn bot_can_unpin(
 /// chats only.
 pub async fn auto_unpin(bot: Bot, msg: Message, state: AppState) -> ResponseResult<()> {
     if !state.contains(msg.chat.id) {
+        log::debug!("chat {} is not enabled; skipping unpin", msg.chat.id);
         return Ok(());
     }
+    log::info!(
+        "auto-forwarded channel post {} in chat {}; unpinning",
+        msg.id,
+        msg.chat.id
+    );
     unpin_with_retry(&bot, msg.chat.id, msg.id, &state).await;
     Ok(())
 }
@@ -98,7 +104,10 @@ async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, sta
     let mut migrated = false;
     loop {
         match with_retry(|| bot.unpin_chat_message(target).message_id(message_id).send()).await {
-            Ok(_) => return,
+            Ok(_) => {
+                log::info!("unpinned message {message_id} in chat {chat_id}");
+                return;
+            }
             Err(RequestError::MigrateToChatId(new_id)) => {
                 if migrated {
                     log::error!("chat {chat_id} migrated twice; giving up");
