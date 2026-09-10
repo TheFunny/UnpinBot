@@ -12,7 +12,7 @@ use std::process::exit;
 use teloxide::adaptors::{DefaultParseMode, Throttle};
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, BotCommandScope, ChatAdministratorRights, ParseMode};
-use teloxide::update_listeners::Polling;
+use teloxide::update_listeners::{polling_default, UpdateListener as _};
 
 use config::Config;
 use state::{AppState, EnabledChats};
@@ -219,23 +219,49 @@ fn build_handler(
     dptree::entry().branch(unpin_branch).branch(command_branch)
 }
 
+/// Docker `stop` / `compose down` delivers SIGTERM, which teloxide's ctrlc
+/// handler (SIGINT only) never sees: without this the container dies after
+/// the 10s grace period with SIGKILL, potentially mid-`save()` of the state
+/// file. Stopping the token unwinds the dispatcher exactly like Ctrl+C does.
+/// Windows has no SIGTERM; ctrlc handles Ctrl+C there.
+#[cfg(unix)]
+fn spawn_sigterm_handler(stop_token: teloxide::stop::StopToken) {
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        sigterm.recv().await;
+        log::info!("SIGTERM received, stopping the dispatcher");
+        stop_token.stop();
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_sigterm_handler(_stop_token: teloxide::stop::StopToken) {}
+
+/// Process-wide embedded catalogs, loaded on first use.
+fn catalogs() -> &'static i18n::Catalogs {
+    static CATALOGS: std::sync::LazyLock<Result<i18n::Catalogs, String>> =
+        std::sync::LazyLock::new(i18n::Catalogs::load);
+    match &*CATALOGS {
+        Ok(c) => c,
+        Err(e) => fatal(e.clone()),
+    }
+}
+
 async fn run() {
-    let mut builder = pretty_env_logger::formatted_builder();
-    builder
-        .parse_default_env()
-        .filter_level(log::LevelFilter::Warn);
-    builder.init();
+    // Defaults to warn; RUST_LOG overrides (parse after the default so the
+    // env directive replaces it — the reverse order silently swallows it).
+    let mut logger = pretty_env_logger::formatted_builder();
+    logger
+        .filter_level(log::LevelFilter::Warn)
+        .parse_default_env();
+    logger.init();
 
     let cfg = match Config::from_env() {
         Ok(c) => c,
         Err(e) => fatal(e),
     };
-    static CATALOGS: std::sync::LazyLock<Result<i18n::Catalogs, String>> =
-        std::sync::LazyLock::new(i18n::Catalogs::load);
-    let catalogs: &i18n::Catalogs = match &*CATALOGS {
-        Ok(c) => c,
-        Err(e) => fatal(e.clone()),
-    };
+    let catalogs = catalogs();
     let chats = match EnabledChats::load(&cfg.state_path) {
         Ok(c) => c,
         Err(e) => fatal(e),
@@ -261,37 +287,11 @@ async fn run() {
 
     setup_bot_profile(&bot, catalogs).await;
 
-    #[allow(unused_mut)]
-    let mut polling = Polling::builder(bot.clone())
-        .timeout(std::time::Duration::from_secs(10))
-        .delete_webhook()
-        .await
-        .build();
-
-    // Docker `stop` / `compose down` sends SIGTERM, which teloxide's ctrlc
-    // handler (SIGINT only) never sees: without this the container dies after
-    // the 10s grace period with SIGKILL, potentially mid-`save()` of the
-    // state file. Stopping the token unwinds the dispatcher exactly like
-    // Ctrl+C does. Windows has no SIGTERM; ctrlc handles Ctrl+C there.
-    #[cfg(unix)]
-    {
-        use teloxide::update_listeners::UpdateListener as _;
-
-        let stop_token = polling.stop_token();
-        tokio::spawn(async move {
-            let mut sigterm =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::warn!("cannot install SIGTERM handler: {e}");
-                        return;
-                    }
-                };
-            sigterm.recv().await;
-            log::info!("SIGTERM received, stopping the dispatcher");
-            stop_token.stop();
-        });
-    }
+    // `polling_default` is the same 10s long-poll + delete-webhook listener
+    // the code built by hand before; taking its stop token lets SIGTERM (and
+    // the ctrlc handler) unwind the dispatcher gracefully.
+    let mut listener = polling_default(bot.clone()).await;
+    spawn_sigterm_handler(listener.stop_token());
 
     let handler = build_handler(catalogs);
     Dispatcher::builder(bot, handler)
@@ -302,7 +302,7 @@ async fn run() {
         .enable_ctrlc_handler()
         .build()
         .dispatch_with_listener(
-            polling,
+            listener,
             teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
                 "an error from the update listener",
             ),
