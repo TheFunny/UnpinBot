@@ -1,26 +1,65 @@
 name: CI
 
+# Test/lint gate on every push and PR. It needs no secrets, so it also covers
+# pull requests from forks.
+#
+# Layering: fmt + clippy + the unit suite + a release-profile build (the same
+# profile the Docker image ships) + the cargo-audit dependency gate.
+#
+# Every action is pinned to a commit SHA (Dependabot keeps the pins current);
+# `dtolnay/rust-toolchain` deliberately stays on its channel ref, because the
+# ref itself is what selects the toolchain (`@stable` = install stable).
+
 on:
   push:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run; without this every
+# intermediate commit of a PR branch keeps a runner busy to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Panicking tests print their backtrace; free when nothing fails.
+  RUST_BACKTRACE: 1
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Generous on purpose: the release-profile build below is cold on the very
+    # first run (fat LTO + codegen-units = 1 + size opt across every
+    # dependency), and a timeout there would kill the job *before* rust-cache
+    # saves its cache — leaving every later run cold again.
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `--locked` on every cargo invocation: Cargo.lock is committed and the
+      # released image is built from it, so a stale lock must fail here instead
+      # of being silently re-resolved — otherwise CI would test a different
+      # dependency set than the one that ships.
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+      # The release profile (fat LTO, size opt, abort on panic, stripped) is
+      # otherwise exercised only by the Docker build on master and tags; a
+      # release-only breakage would then surface at release time.
+      - name: Build release profile
+        run: cargo build --release --locked
       # Dependency vulnerability gate: fails when a crate in Cargo.lock has an
-      # unfixed security advisory. Cached advisory DB across runs.
+      # unfixed security advisory (informational unmaintained/unsound entries
+      # do not fail it). The advisory DB is cached across runs, and Dependabot
+      # opens the PRs that move the affected versions.
       - name: Audit dependencies
-        uses: actions-rust-lang/audit@v1
+        uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24 # v1

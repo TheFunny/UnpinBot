@@ -1,0 +1,32 @@
+version: 2
+
+# Pairs with the `actions-rust-lang/audit` gate in ci.yml: the gate reports
+# advisories in Cargo.lock, this is what actually moves the dependencies.
+# Patch bumps are batched into one PR; minor/major stay separate so they get
+# reviewed and tested individually.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-patch:
+        applies-to: version-updates
+        patterns: ['*']
+        update-types: ['patch']
+
+  # The workflow actions are pinned to commit SHAs; that pin is what makes
+  # bumping them a manual chore, so let the bot do it.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # The Dockerfile's base images (rust:1-alpine, alpine:3.20).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

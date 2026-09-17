@@ -65,4 +65,6 @@ The bot follows each sender's Telegram client language automatically (English an
 
 ## CI
 
-GitHub Actions run format/clippy/tests on every PR and push to `master`, and build a Docker image to Docker Hub on pushes to `master` and `v*` tags.
+Every PR and push to `master` runs format, clippy, the test suite, a release-profile build and a `cargo audit` gate. Pull requests that touch anything the image depends on also build the Docker image without pushing it; pushes to `master` and `v*` tags publish it to Docker Hub (`latest` follows both).
+
+Releases are tagged from `master` — the tag must match the `version` in `Cargo.toml`, and the tag run fails otherwise. Dependabot keeps the dependencies and the pinned workflow actions current.

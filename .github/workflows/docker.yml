@@ -1,12 +1,39 @@
 name: Docker
 
+# Release builds (pushes to master and v* tags) plus a build-only check on pull
+# requests that touch anything the image depends on: the Dockerfile's
+# stub-source machinery and the entrypoint are exactly the parts that would
+# otherwise break only at release time.
+#
+# Actions are pinned to commit SHAs (Dependabot keeps the pins current).
+
 on:
   push:
     branches: [master]
     tags: ['v*']
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/docker.yml
 
 env:
-  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/unpinbot
+  # Hardcoded, not `${{ secrets.DOCKERHUB_USERNAME }}`: pull requests get no
+  # secrets, and an empty variable would hand buildx an invalid image name.
+  # The namespace is public anyway (docker-compose.yml pins the same image).
+  DOCKERHUB_REPO: yoursfunny/unpinbot
+
+permissions:
+  contents: read
+
+# Serialize runs per ref, and never cancel: a killed run would drop a
+# half-finished image push.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # A tag push and a branch push to the same commit fire two workflow runs;
@@ -14,12 +41,29 @@ jobs:
   # pushed commit is not already tagged (the tag run covers it).
   should-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       build: ${{ steps.check.outputs.build }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      # A release tag is a version claim: Cargo.toml is bumped by hand, so
+      # `v1.3.1` with Cargo.toml still at 1.3.0 would publish an image whose
+      # tag lies about its contents (the binary carries no version of its own).
+      - name: Verify the tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # tr -d '\r': a CRLF checkout (core.autocrlf on Windows) would
+          # otherwise yield "1.3.1\r" and false-fail every tag.
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 | tr -d '\r')"
+          if [ "$version" != "$tag" ]; then
+            echo "::error file=Cargo.toml::Cargo.toml is at $version but the tag is v$tag"
+            exit 1
+          fi
+          echo "Cargo.toml: $version matches v$tag"
       - id: check
         shell: bash
         run: |
@@ -34,33 +78,43 @@ jobs:
     needs: should-build
     if: needs.should-build.outputs.build == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.DOCKERHUB_REPO }}
+          # `latest` follows every image we publish — master pushes and tag
+          # pushes alike. Without the explicit enable, tag runs produced only
+          # their version tag, so `latest` (what docker-compose.yml pulls)
+          # stayed on whatever commit was last pushed to master untagged. PR
+          # runs never push, so they cannot move it.
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{version}}
+            type=sha
+      # Pull requests build the image to prove the Dockerfile still works, but
+      # must not read registry credentials (fork PRs have none).
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.DOCKERHUB_REPO }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=sha
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Fixed scope: the gha backend defaults to the current git ref, which
           # would give every new tag a cold cache on release builds. mode=max
-          # keeps every stage's layers (deps layer included).
+          # keeps every stage's layers (deps layer included). PR runs only read
+          # the cache (cache-to is empty) so they cannot evict it.
           cache-from: type=gha,scope=unpinbot-build
-          cache-to: type=gha,mode=max,scope=unpinbot-build
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=unpinbot-build' || '' }}
