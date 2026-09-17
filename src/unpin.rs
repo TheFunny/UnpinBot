@@ -235,7 +235,77 @@ async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use teloxide::types::{ChatMemberKind, ChatMemberStatus, User};
+
+    /// A genuine `reqwest::Error`: `RequestError::Network` accepts nothing
+    /// else. Any `reqwest::Error` triggers the same retry path — the logic only
+    /// inspects the variant — and a malformed URL yields one without touching
+    /// the network. Built once per test so the retry loop does no I/O and its
+    /// timing stays exact.
+    async fn network_error() -> std::sync::Arc<reqwest::Error> {
+        let err = reqwest::Client::new()
+            .get("not-a-url")
+            .send()
+            .await
+            .expect_err("a relative URL must fail");
+        std::sync::Arc::new(err)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_transient_failures_up_to_the_attempt_budget() {
+        let error = network_error().await;
+        let calls = AtomicU32::new(0);
+        let start = tokio::time::Instant::now();
+        let result = with_retry(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let error = error.clone();
+            async move { Err::<(), _>(RequestError::Network(error)) }
+        })
+        .await;
+        assert!(matches!(result, Err(RequestError::Network(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS);
+        // Every attempt but the last waits out one backoff slot.
+        assert_eq!(start.elapsed(), BACKOFF.iter().sum::<Duration>());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stops_on_success_and_on_permanent_errors() {
+        let error = network_error().await;
+        let calls = AtomicU32::new(0);
+        let start = tokio::time::Instant::now();
+        let result = with_retry(|| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            let error = error.clone();
+            async move {
+                if attempt == 0 {
+                    Err(RequestError::Network(error))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(start.elapsed(), BACKOFF[0]);
+
+        let calls = AtomicU32::new(0);
+        let result = with_retry(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(RequestError::Api(teloxide::ApiError::ChatNotFound)) }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(RequestError::Api(teloxide::ApiError::ChatNotFound))
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "permanent errors must not be retried"
+        );
+    }
 
     fn user(id: u64) -> User {
         User {
