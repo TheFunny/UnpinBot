@@ -95,6 +95,22 @@ pub async fn auto_unpin(bot: Bot, msg: Message, state: AppState) -> ResponseResu
     Ok(())
 }
 
+/// Whether an `unpinChatMessage` failure means there is nothing to unpin: the
+/// message is gone, or it was already unpinned — an admin got there first, or
+/// a retried request that had actually succeeded. Either way the desired end
+/// state is reached, so it must not be logged as an error.
+///
+/// Telegram has no dedicated error for the second case; it arrives as
+/// [`ApiError::Unknown`] carrying the Bot API text `message to unpin not
+/// found`.
+fn nothing_to_unpin(err: &teloxide::ApiError) -> bool {
+    match err {
+        teloxide::ApiError::MessageIdInvalid => true,
+        teloxide::ApiError::Unknown(text) => text.contains("message to unpin not found"),
+        _ => false,
+    }
+}
+
 /// Unpins `message_id` with retry; migrates enabled-chat state when the group
 /// was upgraded to a supergroup.
 async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, state: &AppState) {
@@ -131,6 +147,11 @@ async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, sta
             }
             Err(RequestError::Api(teloxide::ApiError::ChatNotFound)) => {
                 log::warn!("chat {chat_id} not found while unpinning");
+                return;
+            }
+            // Nothing left to unpin: see `nothing_to_unpin`.
+            Err(RequestError::Api(err)) if nothing_to_unpin(&err) => {
+                log::debug!("message {message_id} in chat {chat_id} is not pinned");
                 return;
             }
             Err(e) => {
@@ -205,6 +226,19 @@ mod tests {
             p |= ChatPermissions::PIN_MESSAGES;
         }
         Some(p)
+    }
+
+    #[test]
+    fn unpin_failures_that_mean_already_unpinned() {
+        use teloxide::ApiError;
+        assert!(nothing_to_unpin(&ApiError::MessageIdInvalid));
+        assert!(nothing_to_unpin(&ApiError::Unknown(
+            "Bad Request: message to unpin not found".to_owned()
+        )));
+        assert!(!nothing_to_unpin(&ApiError::Unknown(
+            "Bad Request: nope".to_owned()
+        )));
+        assert!(!nothing_to_unpin(&ApiError::ChatNotFound));
     }
 
     #[test]
