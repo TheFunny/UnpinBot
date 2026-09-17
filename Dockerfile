@@ -23,7 +23,7 @@ RUN touch src/*.rs \
     && cargo build --release \
     && cp target/release/unpinbot /unpinbot
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache su-exec
 WORKDIR /app
 COPY --from=build /unpinbot /app/unpinbot
