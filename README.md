@@ -59,6 +59,8 @@ cargo run --release
 
 Enabled chats are persisted in `pers_data/state.json` and survive restarts. If you are upgrading from an old Python-based release, the old state cannot be migrated — run `/enable` again in each group.
 
+If the bot loses the pin-messages permission or is removed from the group, it disables auto-unpin there and says so in the group (when it still can). Grant the permission again and run `/enable` — no need to touch the state file by hand.
+
 The bot follows each sender's Telegram client language automatically (English and Chinese; English is the fallback). Command menus and the bot description match the client language too — no configuration needed.
 
 ## CI

@@ -7,6 +7,7 @@
         "not_group": "Please use this bot in discussion groups.",
         "not_admin": "Only administrator can do that.",
         "require_rights": "Failed to enable. Require permission to pin messages.",
+        "rights_revoked": "Unpin has been disabled: this bot lost the permission to pin messages. Grant it again and send /enable.",
         "already_enabled": "Already enabled.",
         "already_disabled": "Already disabled.",
         "retry_later": "Something went wrong, please try again later."

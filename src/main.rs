@@ -171,7 +171,14 @@ fn build_handler(
         })
         .endpoint(unpin::auto_unpin);
 
-    dptree::entry().branch(unpin_branch).branch(command_branch)
+    // Rights changes: disabling the chat when the bot can no longer unpin
+    // keeps the persisted set from going stale.
+    let member_branch = Update::filter_my_chat_member().endpoint(unpin::my_chat_member);
+
+    dptree::entry()
+        .branch(unpin_branch)
+        .branch(command_branch)
+        .branch(member_branch)
 }
 
 /// Docker `stop` / `compose down` delivers SIGTERM, which teloxide's ctrlc

@@ -4,7 +4,10 @@ use std::future::Future;
 use std::time::Duration;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatMember, ChatMemberKind, ChatPermissions, ChatType, MessageId};
+use teloxide::types::{
+    Chat, ChatKind, ChatMember, ChatMemberKind, ChatMemberUpdated, ChatPermissions, ChatType,
+    MessageId, PublicChatKind,
+};
 use teloxide::RequestError;
 
 use crate::state::AppState;
@@ -55,6 +58,18 @@ pub fn is_privileged(member: &ChatMember) -> bool {
         member.kind,
         ChatMemberKind::Owner(_) | ChatMemberKind::Administrator(_)
     )
+}
+
+/// Maps a chat's public kind to the wire [`ChatType`] used by the predicates.
+pub fn chat_type_of(chat: &Chat) -> ChatType {
+    match &chat.kind {
+        ChatKind::Public(public) => match public.kind {
+            PublicChatKind::Group => ChatType::Group,
+            PublicChatKind::Supergroup(_) => ChatType::Supergroup,
+            PublicChatKind::Channel(_) => ChatType::Channel,
+        },
+        ChatKind::Private(_) => ChatType::Private,
+    }
 }
 
 /// Whether the bot itself can unpin in `chat_type`.
@@ -109,6 +124,61 @@ fn nothing_to_unpin(err: &teloxide::ApiError) -> bool {
         teloxide::ApiError::Unknown(text) => text.contains("message to unpin not found"),
         _ => false,
     }
+}
+
+/// Keeps enabled state honest when the bot's own rights change.
+///
+/// Telegram pushes `my_chat_member` on promotion, demotion, and removal.
+/// `/enable` checks the rights once, so without this a revoked pin right
+/// leaves the chat "enabled" forever: every later channel post fails and the
+/// admin never learns why.
+pub async fn my_chat_member(
+    bot: Bot,
+    upd: ChatMemberUpdated,
+    state: AppState,
+) -> ResponseResult<()> {
+    let chat_id = upd.chat.id;
+    if !state.contains(chat_id) {
+        return Ok(());
+    }
+    let chat_type = chat_type_of(&upd.chat);
+    // Basic groups carry no pin right on the bot's own membership; theirs
+    // lives in the chat's default member permissions, exactly as in /enable.
+    let default_permissions = if chat_type == ChatType::Group {
+        match with_retry(|| bot.get_chat(chat_id).send()).await {
+            Ok(info) => info.permissions(),
+            // A transient failure must not flip state.
+            Err(e) => {
+                log::warn!("get_chat failed for chat {chat_id} on rights change: {e}");
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    if bot_can_unpin(chat_type, &upd.new_chat_member, default_permissions) {
+        return Ok(());
+    }
+
+    match state.remove_and_save(chat_id) {
+        Ok(true) => log::info!("chat {chat_id} disabled: the bot can no longer unpin there"),
+        Ok(false) => return Ok(()),
+        Err(e) => {
+            log::error!("failed to persist disable for chat {chat_id}: {e}");
+            return Ok(());
+        }
+    }
+
+    // Best effort: after a kick the bot cannot deliver this at all.
+    let lang = crate::catalogs().resolve(upd.from.language_code.as_deref());
+    if let Err(e) = bot
+        .send_message(chat_id, &lang.error.rights_revoked)
+        .send()
+        .await
+    {
+        log::debug!("could not announce disabled state in chat {chat_id}: {e}");
+    }
+    Ok(())
 }
 
 /// Unpins `message_id` with retry; migrates enabled-chat state when the group

@@ -4,21 +4,9 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatAction, ChatType};
 use teloxide::utils::command::BotCommands;
 
-/// Maps a chat's public kind to the wire `ChatType` used by the predicate.
-fn chat_type_of(chat: &teloxide::types::Chat) -> ChatType {
-    match &chat.kind {
-        teloxide::types::ChatKind::Public(p) => match p.kind {
-            teloxide::types::PublicChatKind::Group => ChatType::Group,
-            teloxide::types::PublicChatKind::Supergroup(_) => ChatType::Supergroup,
-            teloxide::types::PublicChatKind::Channel(_) => ChatType::Channel,
-        },
-        teloxide::types::ChatKind::Private(_) => ChatType::Private,
-    }
-}
-
 use crate::i18n::Lang;
 use crate::state::AppState;
-use crate::unpin::{bot_can_unpin, is_privileged, with_retry};
+use crate::unpin::{bot_can_unpin, chat_type_of, is_privileged, with_retry};
 use crate::Bot;
 
 #[derive(BotCommands, Clone, Debug, PartialEq)]
