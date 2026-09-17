@@ -44,7 +44,8 @@ fn fatal(msg: String) -> ! {
     exit(1)
 }
 
-/// Registers the bot's default admin rights, commands, and description.
+/// Registers the bot's default admin rights, then the command menus and
+/// descriptions for every embedded language plus the default variant.
 /// Failures here are logged but not fatal: the core unpin loop does not
 /// depend on them.
 async fn setup_bot_profile(bot: &Bot, catalogs: &i18n::Catalogs) {
@@ -75,114 +76,68 @@ async fn setup_bot_profile(bot: &Bot, catalogs: &i18n::Catalogs) {
         log::error!("set_my_default_administrator_rights failed: {e}");
     }
 
-    // Register profile data once without a language code (the default shown
-    // to users whose language has no dedicated variant) and once per
-    // supported language; Telegram then serves the variant matching the
-    // user's client language automatically.
-    for code in i18n::SUPPORTED {
-        let lang = catalogs.resolve(Some(code));
-        let basic = vec![
-            BotCommand::new("start", lang.cmd.start.clone()),
-            BotCommand::new("help", lang.cmd.help.clone()),
-        ];
-        let admin = [
-            BotCommand::new("enable", lang.cmd.enable.clone()),
-            BotCommand::new("disable", lang.cmd.disable.clone()),
-        ];
-
-        if let Err(e) = with_retry(|| {
-            bot.set_my_commands(basic.clone())
-                .scope(BotCommandScope::AllGroupChats)
-                .language_code(code)
-                .send()
-        })
-        .await
-        {
-            log::error!("set_my_commands(AllGroupChats, {code}) failed: {e}");
-        }
-        let mut admin_cmds = basic.clone();
-        admin_cmds.extend_from_slice(&admin);
-        if let Err(e) = with_retry(|| {
-            bot.set_my_commands(admin_cmds.clone())
-                .scope(BotCommandScope::AllChatAdministrators)
-                .language_code(code)
-                .send()
-        })
-        .await
-        {
-            log::error!("set_my_commands(AllChatAdministrators, {code}) failed: {e}");
-        }
-
-        if let Err(e) = with_retry(|| {
-            bot.set_my_description()
-                .description(lang.description.clone())
-                .language_code(code)
-                .send()
-        })
-        .await
-        {
-            log::error!("set_my_description({code}) failed: {e}");
-        }
-        if let Err(e) = with_retry(|| {
-            bot.set_my_short_description()
-                .short_description(lang.description.clone())
-                .language_code(code)
-                .send()
-        })
-        .await
-        {
-            log::error!("set_my_short_description({code}) failed: {e}");
-        }
+    // Register profile data once per embedded language (Telegram serves the
+    // variant matching the user's client language automatically) and once
+    // with no language code, which is the default shown to users whose
+    // language has no dedicated variant.
+    let targets = catalogs
+        .all()
+        .map(|(code, lang)| (Some(code), lang))
+        .chain(std::iter::once((None, catalogs.resolve(None))));
+    for (code, lang) in targets {
+        register_profile(bot, code, lang).await;
     }
+}
 
-    // Default (no language_code) variants: shown to users whose client
-    // language has no dedicated variant above.
-    let lang = catalogs.resolve(None);
+/// Registers the command menus and descriptions for one variant. `code` is
+/// `None` for the default variant, where the Bot API wants `language_code`
+/// omitted entirely.
+async fn register_profile(bot: &Bot, code: Option<&str>, lang: &i18n::Lang) {
     let basic = vec![
         BotCommand::new("start", lang.cmd.start.clone()),
         BotCommand::new("help", lang.cmd.help.clone()),
     ];
-    let admin = [
+    let mut admin_cmds = basic.clone();
+    admin_cmds.extend([
         BotCommand::new("enable", lang.cmd.enable.clone()),
         BotCommand::new("disable", lang.cmd.disable.clone()),
-    ];
-    if let Err(e) = with_retry(|| {
-        bot.set_my_commands(basic.clone())
-            .scope(BotCommandScope::AllGroupChats)
-            .send()
-    })
-    .await
-    {
-        log::error!("set_my_commands(AllGroupChats, default) failed: {e}");
+    ]);
+
+    // All four requests below share the same optional `language_code` setter.
+    let group_cmds = bot
+        .set_my_commands(basic.clone())
+        .scope(BotCommandScope::AllGroupChats);
+    let admin_scope_cmds = bot
+        .set_my_commands(admin_cmds)
+        .scope(BotCommandScope::AllChatAdministrators);
+    let description = bot
+        .set_my_description()
+        .description(lang.description.clone());
+    let short_description = bot
+        .set_my_short_description()
+        .short_description(lang.description.clone());
+    let (group_cmds, admin_scope_cmds, description, short_description) = match code {
+        Some(code) => (
+            group_cmds.language_code(code),
+            admin_scope_cmds.language_code(code),
+            description.language_code(code),
+            short_description.language_code(code),
+        ),
+        None => (group_cmds, admin_scope_cmds, description, short_description),
+    };
+
+    let label = code.unwrap_or("default");
+    if let Err(e) = with_retry(|| group_cmds.clone().send()).await {
+        log::error!("set_my_commands(AllGroupChats, {label}) failed: {e}");
     }
-    let mut admin_cmds = basic.clone();
-    admin_cmds.extend_from_slice(&admin);
-    if let Err(e) = with_retry(|| {
-        bot.set_my_commands(admin_cmds.clone())
-            .scope(BotCommandScope::AllChatAdministrators)
-            .send()
-    })
-    .await
-    {
-        log::error!("set_my_commands(AllChatAdministrators, default) failed: {e}");
+    if let Err(e) = with_retry(|| admin_scope_cmds.clone().send()).await {
+        log::error!("set_my_commands(AllChatAdministrators, {label}) failed: {e}");
     }
-    if let Err(e) = with_retry(|| {
-        bot.set_my_description()
-            .description(lang.description.clone())
-            .send()
-    })
-    .await
-    {
-        log::error!("set_my_description(default) failed: {e}");
+    if let Err(e) = with_retry(|| description.clone().send()).await {
+        log::error!("set_my_description({label}) failed: {e}");
     }
-    if let Err(e) = with_retry(|| {
-        bot.set_my_short_description()
-            .short_description(lang.description.clone())
-            .send()
-    })
-    .await
-    {
-        log::error!("set_my_short_description(default) failed: {e}");
+    if let Err(e) = with_retry(|| short_description.clone().send()).await {
+        log::error!("set_my_short_description({label}) failed: {e}");
     }
 }
 

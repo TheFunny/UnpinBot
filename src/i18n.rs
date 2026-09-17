@@ -34,38 +34,55 @@ pub struct Commands {
 const EN: &str = include_str!("../lang/en.json");
 const ZH: &str = include_str!("../lang/zh.json");
 
-/// Languages with embedded catalogs, lowercase ISO 639-1 codes.
-pub const SUPPORTED: [&str; 2] = ["en", "zh"];
+/// Every embedded catalog, keyed by lowercase ISO 639-1 primary subtag. This
+/// table is the only place a language is declared: [`Catalogs::load`] parses
+/// it and [`Catalogs::resolve`] matches against it.
+const EMBEDDED: [(&str, &str); 2] = [("en", EN), ("zh", ZH)];
 
 /// Language used when the sender's language is unknown or unsupported.
 pub const FALLBACK: &str = "en";
 
-/// Both embedded catalogs, loaded once at startup.
+/// All embedded catalogs, parsed once at startup.
 pub struct Catalogs {
-    en: Lang,
-    zh: Lang,
+    langs: Vec<(&'static str, Lang)>,
 }
 
 impl Catalogs {
-    /// Parses both embedded catalogs. A parse failure is a startup error.
+    /// Parses every embedded catalog. A parse failure is a startup error.
     pub fn load() -> Result<Self, String> {
-        let en: Lang = serde_json::from_str(EN)
-            .map_err(|e| format!("built-in en language file is invalid: {e}"))?;
-        let zh: Lang = serde_json::from_str(ZH)
-            .map_err(|e| format!("built-in zh language file is invalid: {e}"))?;
-        Ok(Self { en, zh })
+        let langs = EMBEDDED
+            .iter()
+            .map(|(code, json)| {
+                serde_json::from_str(json)
+                    .map(|lang| (*code, lang))
+                    .map_err(|e| format!("built-in {code} language file is invalid: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            langs.iter().any(|(code, _)| *code == FALLBACK),
+            "built-in {FALLBACK} catalog is missing"
+        );
+        Ok(Self { langs })
+    }
+
+    /// Every embedded catalog with its language code, in declaration order.
+    pub fn all(&self) -> impl Iterator<Item = (&'static str, &Lang)> {
+        self.langs.iter().map(|(code, lang)| (*code, lang))
     }
 
     /// Picks the catalog for an IETF language tag: the primary subtag
-    /// (`zh-Hans-CN` -> `zh`) is matched against [`SUPPORTED`]; anything
-    /// else falls back to [`FALLBACK`].
+    /// (`zh-Hans-CN` -> `zh`) is matched against the embedded catalogs;
+    /// anything else falls back to [`FALLBACK`].
     pub fn resolve(&self, code: Option<&str>) -> &Lang {
-        let Some(code) = code else { return &self.en };
-        let primary = code.split('-').next().unwrap_or(FALLBACK).to_lowercase();
-        match primary.as_str() {
-            "zh" => &self.zh,
-            _ => &self.en,
-        }
+        let primary = code
+            .and_then(|code| code.split('-').next())
+            .map(str::to_lowercase);
+        self.langs
+            .iter()
+            .find(|(code, _)| Some(*code) == primary.as_deref())
+            .or_else(|| self.langs.iter().find(|(code, _)| *code == FALLBACK))
+            .map(|(_, lang)| lang)
+            .expect("load() guarantees a fallback catalog")
     }
 }
 
@@ -74,64 +91,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn english_catalog_is_complete() {
+    fn embedded_catalogs_are_complete() {
         let catalogs = Catalogs::load().expect("catalogs parse");
-        let lang = &catalogs.en;
-        assert!(!lang.start.is_empty());
-        assert!(!lang.help.is_empty());
-        assert!(!lang.enable.is_empty());
-        assert!(!lang.disable.is_empty());
-        assert!(!lang.description.is_empty());
-        for s in [
-            &lang.error.not_group,
-            &lang.error.not_admin,
-            &lang.error.require_rights,
-            &lang.error.already_enabled,
-            &lang.error.already_disabled,
-            &lang.error.retry_later,
-            &lang.cmd.start,
-            &lang.cmd.help,
-            &lang.cmd.enable,
-            &lang.cmd.disable,
-        ] {
-            assert!(!s.is_empty());
-        }
-    }
-
-    #[test]
-    fn chinese_catalog_is_complete() {
-        let catalogs = Catalogs::load().expect("catalogs parse");
-        let lang = &catalogs.zh;
-        assert!(!lang.start.is_empty());
-        assert!(!lang.help.is_empty());
-        assert!(!lang.enable.is_empty());
-        assert!(!lang.disable.is_empty());
-        assert!(!lang.description.is_empty());
-        for s in [
-            &lang.error.not_group,
-            &lang.error.not_admin,
-            &lang.error.require_rights,
-            &lang.error.already_enabled,
-            &lang.error.already_disabled,
-            &lang.error.retry_later,
-            &lang.cmd.start,
-            &lang.cmd.help,
-            &lang.cmd.enable,
-            &lang.cmd.disable,
-        ] {
-            assert!(!s.is_empty());
+        let codes: Vec<_> = catalogs.all().map(|(code, _)| code).collect();
+        assert_eq!(codes, ["en", "zh"], "embedded language list changed");
+        for (code, lang) in catalogs.all() {
+            for (field, s) in [
+                ("start", &lang.start),
+                ("help", &lang.help),
+                ("enable", &lang.enable),
+                ("disable", &lang.disable),
+                ("description", &lang.description),
+                ("error.not_group", &lang.error.not_group),
+                ("error.not_admin", &lang.error.not_admin),
+                ("error.require_rights", &lang.error.require_rights),
+                ("error.already_enabled", &lang.error.already_enabled),
+                ("error.already_disabled", &lang.error.already_disabled),
+                ("error.retry_later", &lang.error.retry_later),
+                ("cmd.start", &lang.cmd.start),
+                ("cmd.help", &lang.cmd.help),
+                ("cmd.enable", &lang.cmd.enable),
+                ("cmd.disable", &lang.cmd.disable),
+            ] {
+                assert!(!s.is_empty(), "{code}: {field} is empty");
+            }
         }
     }
 
     #[test]
     fn resolve_matches_primary_subtag_with_fallback() {
         let catalogs = Catalogs::load().expect("catalogs parse");
-        assert_eq!(catalogs.resolve(None).start, catalogs.en.start);
-        assert_eq!(
-            catalogs.resolve(Some("zh-Hans-CN")).start,
-            catalogs.zh.start
-        );
-        assert_eq!(catalogs.resolve(Some("en-US")).start, catalogs.en.start);
-        assert_eq!(catalogs.resolve(Some("pt-BR")).start, catalogs.en.start);
+        let en = catalogs.resolve(Some("en")).start.clone();
+        let zh = catalogs.resolve(Some("zh")).start.clone();
+        assert_ne!(en, zh, "catalogs are not distinct");
+
+        assert_eq!(catalogs.resolve(None).start, en);
+        assert_eq!(catalogs.resolve(Some("zh-Hans-CN")).start, zh);
+        assert_eq!(catalogs.resolve(Some("ZH")).start, zh);
+        assert_eq!(catalogs.resolve(Some("en-US")).start, en);
+        assert_eq!(catalogs.resolve(Some("pt-BR")).start, en);
     }
 }

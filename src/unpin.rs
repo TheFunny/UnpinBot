@@ -13,16 +13,14 @@ use crate::Bot;
 /// Maximum attempts for a retried Telegram call.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-const BACKOFF: [Duration; 3] = [
-    Duration::from_millis(500),
-    Duration::from_millis(1000),
-    Duration::from_millis(2000),
-];
+/// Backoff before each retry after the first attempt; the length is the
+/// attempt budget, so a miscount cannot silently leave an entry unreachable.
+const BACKOFF: [Duration; MAX_ATTEMPTS as usize - 1] =
+    [Duration::from_millis(500), Duration::from_millis(1000)];
 
 /// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying transient failures:
-/// `Network` errors with exponential backoff (0.5s/1s/2s) and `RetryAfter`
-/// by sleeping exactly as long as Telegram demands. Any other error returns
-/// immediately.
+/// `Network` errors with backoff from [`BACKOFF`] and `RetryAfter` by sleeping
+/// exactly as long as Telegram demands. Any other error returns immediately.
 pub async fn with_retry<T, F, Fut>(f: F) -> Result<T, RequestError>
 where
     F: Fn() -> Fut,
