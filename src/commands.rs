@@ -1,7 +1,7 @@
 //! `/start` `/help` `/enable` `/disable` command handlers.
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatType};
+use teloxide::types::{ChatAction, ChatType, ReplyParameters};
 use teloxide::utils::command::BotCommands;
 
 use crate::i18n::Lang;
@@ -19,7 +19,13 @@ pub enum Command {
 }
 
 async fn reply(bot: &Bot, msg: &Message, text: &str) -> ResponseResult<()> {
-    bot.send_message(msg.chat.id, text).send().await?;
+    // Reply to the triggering message so the answer reads in context in busy
+    // groups; `allow_sending_without_reply` keeps it working when that message
+    // is gone by the time we answer.
+    bot.send_message(msg.chat.id, text)
+        .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
+        .send()
+        .await?;
     Ok(())
 }
 
@@ -106,14 +112,7 @@ pub async fn enable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> Resp
     } else {
         None
     };
-    let bot_id = match with_retry(|| bot.get_me().send()).await {
-        Ok(me) => me.user.id,
-        Err(e) => {
-            log::error!("get_me failed during enable: {e}");
-            reply(&bot, &msg, &lang.error.retry_later).await?;
-            return Ok(());
-        }
-    };
+    let bot_id = crate::bot_id();
     let bot_member = match with_retry(|| bot.get_chat_member(msg.chat.id, bot_id).send()).await {
         Ok(m) => m,
         Err(e) => {

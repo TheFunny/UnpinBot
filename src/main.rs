@@ -11,7 +11,7 @@ use std::process::exit;
 
 use teloxide::adaptors::{DefaultParseMode, Throttle};
 use teloxide::prelude::*;
-use teloxide::types::{BotCommand, BotCommandScope, ChatAdministratorRights, ParseMode};
+use teloxide::types::{BotCommand, BotCommandScope, ChatAdministratorRights, ParseMode, UserId};
 use teloxide::update_listeners::{polling_default, UpdateListener as _};
 
 use config::Config;
@@ -210,6 +210,15 @@ fn catalogs() -> &'static i18n::Catalogs {
     }
 }
 
+/// The bot's own user id, set from `get_me` during startup — before the
+/// dispatcher runs, so handlers never need their own lookup.
+static BOT_ID: std::sync::OnceLock<UserId> = std::sync::OnceLock::new();
+
+/// The bot's own user id.
+fn bot_id() -> UserId {
+    *BOT_ID.get().expect("bot id is resolved during startup")
+}
+
 async fn run() {
     // Defaults to warn; RUST_LOG overrides (parse after the default so the
     // env directive replaces it — the reverse order silently swallows it).
@@ -242,6 +251,7 @@ async fn run() {
         Ok(me) => me,
         Err(e) => fatal(format!("cannot reach Telegram with provided token: {e}")),
     };
+    let _ = BOT_ID.set(me.user.id);
     log::info!(
         "bot @{} started",
         me.user.username.as_deref().unwrap_or("?")
