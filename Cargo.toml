@@ -2,7 +2,6 @@
 name = "unpinbot"
 version = "1.2.0"
 edition = "2021"
-rust-version = "1.82"
 description = "Telegram bot to automatically unpin channel posts forwarded into connected discussion groups"
 license = "MIT"
 
@@ -13,7 +12,10 @@ teloxide = { version = "0.17", default-features = false, features = [
     "macros",
     "ctrlc_handler",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Only the features this crate's own code uses: `signal`/`time`/`rt-multi-thread`.
+# Relying on teloxide pulling them in transitively makes a dependency bump a
+# surprise build failure.
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

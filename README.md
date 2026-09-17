@@ -4,7 +4,7 @@ A Telegram bot to automatically unpin channel posts forwarded into connected dis
 
 ## Requirement
 
-- Rust 1.82 or later (or just Docker)
+- A recent stable Rust toolchain (or just Docker)
 
 ## Configuration
 

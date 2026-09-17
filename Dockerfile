@@ -15,10 +15,11 @@ RUN mkdir -p src \
 #    the real sources. `touch` makes every .rs newer than the stub artifacts,
 #    forcing a rebuild of just this crate while the dependency layer stays
 #    cached. (`cargo clean -p` does NOT work here — it removes 0 files and the
-#    stub binary silently ships.)
+#    stub binary silently ships.) `src/*.rs` covers every source file, which
+#    keeps the build independent of busybox `find` behaviour.
 COPY lang/ ./lang/
 COPY src/ ./src/
-RUN find src -type f -name '*.rs' -exec touch {} + \
+RUN touch src/*.rs \
     && cargo build --release \
     && cp target/release/unpinbot /unpinbot
 
