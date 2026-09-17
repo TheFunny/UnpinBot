@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +11,9 @@ use teloxide::types::ChatId;
 
 #[derive(Serialize, Deserialize, Default)]
 struct StateFile {
+    /// Defaulted so a hand-written `{}` loads as an empty set instead of
+    /// hard-failing startup on a "corrupt" file.
+    #[serde(default)]
     enabled_chats: HashSet<i64>,
 }
 
@@ -74,7 +78,8 @@ impl EnabledChats {
         }
     }
 
-    /// Atomically rewrites the state file: write sibling `.tmp`, then rename.
+    /// Atomically rewrites the state file: write sibling `.tmp`, flush it to
+    /// disk, then rename over the target.
     pub fn save(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
@@ -86,7 +91,18 @@ impl EnabledChats {
         };
         let bytes =
             serde_json::to_vec_pretty(&file).map_err(|e| format!("cannot serialize state: {e}"))?;
-        fs::write(&tmp, bytes).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        // `sync_all` before the rename: the rename only guarantees that a
+        // reader sees one whole version or the other, not that the bytes have
+        // reached the disk. Without the flush a crash right after this could
+        // leave an empty file, which the next start then refuses to load.
+        // ponytail: the file is synced, the directory entry is not — a lost
+        // rename merely reverts to the previous state, which is fine here.
+        fs::File::create(&tmp)
+            .and_then(|mut file| {
+                file.write_all(&bytes)?;
+                file.sync_all()
+            })
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
         fs::rename(&tmp, &self.path)
             .map_err(|e| format!("cannot rename into {}: {e}", self.path.display()))?;
         log::debug!(
@@ -171,6 +187,15 @@ mod tests {
         let path = temp_path(&dir);
         fs::write(&path, "{").unwrap();
         assert!(EnabledChats::load(&path).is_err());
+    }
+
+    #[test]
+    fn empty_object_loads_empty() {
+        // A hand-written `{}` is not corruption: only malformed JSON is.
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        fs::write(&path, "{}").unwrap();
+        assert_eq!(EnabledChats::load(&path).unwrap().len(), 0);
     }
 
     #[test]
