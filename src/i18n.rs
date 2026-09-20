@@ -1,5 +1,7 @@
 //! Compile-time embedded UI strings (`lang/{en,zh}.json`).
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -45,7 +47,9 @@ pub const FALLBACK: &str = "en";
 
 /// All embedded catalogs, parsed once at startup.
 pub struct Catalogs {
-    langs: Vec<(&'static str, Lang)>,
+    /// `Arc`, so [`Catalogs::resolve`] can hand a catalog to a handler with a
+    /// refcount bump instead of cloning every string in it per update.
+    langs: Vec<(&'static str, Arc<Lang>)>,
 }
 
 impl Catalogs {
@@ -55,7 +59,7 @@ impl Catalogs {
             .iter()
             .map(|(code, json)| {
                 serde_json::from_str(json)
-                    .map(|lang| (*code, lang))
+                    .map(|lang| (*code, Arc::new(lang)))
                     .map_err(|e| format!("built-in {code} language file is invalid: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -67,14 +71,16 @@ impl Catalogs {
     }
 
     /// Every embedded catalog with its language code, in declaration order.
-    pub fn all(&self) -> impl Iterator<Item = (&'static str, &Lang)> {
-        self.langs.iter().map(|(code, lang)| (*code, lang))
+    pub fn all(&self) -> impl Iterator<Item = (&'static str, Arc<Lang>)> + '_ {
+        self.langs
+            .iter()
+            .map(|(code, lang)| (*code, Arc::clone(lang)))
     }
 
     /// Picks the catalog for an IETF language tag: the primary subtag
     /// (`zh-Hans-CN` -> `zh`) is matched against the embedded catalogs;
     /// anything else falls back to [`FALLBACK`].
-    pub fn resolve(&self, code: Option<&str>) -> &Lang {
+    pub fn resolve(&self, code: Option<&str>) -> Arc<Lang> {
         let primary = code
             .and_then(|code| code.split('-').next())
             .map(str::to_lowercase);
@@ -82,7 +88,7 @@ impl Catalogs {
             .iter()
             .find(|(code, _)| Some(*code) == primary.as_deref())
             .or_else(|| self.langs.iter().find(|(code, _)| *code == FALLBACK))
-            .map(|(_, lang)| lang)
+            .map(|(_, lang)| Arc::clone(lang))
             .expect("load() guarantees a fallback catalog")
     }
 }

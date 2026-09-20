@@ -153,6 +153,15 @@ impl AppState {
         Ok(true)
     }
 
+    /// Rewrites the state file once, to surface an unwritable path at startup
+    /// while the operator is still watching the logs: `load` succeeds on a
+    /// read-only file, and the failure would otherwise only show up as a
+    /// generic "try again later" reply to the first `/enable`. Unpinning keeps
+    /// working for the chats already loaded, so callers warn, not abort.
+    pub fn verify_writable(&self) -> Result<(), String> {
+        self.0.lock().expect("state poisoned").save()
+    }
+
     pub fn replace_and_save(&self, old: ChatId, new: ChatId) -> Result<bool, String> {
         let mut guard = self.0.lock().expect("state poisoned");
         if !guard.replace(old, new) {

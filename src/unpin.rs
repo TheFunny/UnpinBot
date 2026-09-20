@@ -5,15 +5,14 @@ use std::time::Duration;
 
 use teloxide::prelude::*;
 use teloxide::types::{
-    Chat, ChatKind, ChatMember, ChatMemberKind, ChatMemberUpdated, ChatPermissions, ChatType,
-    MessageId, PublicChatKind,
+    Chat, ChatMember, ChatMemberKind, ChatMemberUpdated, ChatMigration, ChatPermissions, MessageId,
 };
 use teloxide::RequestError;
 
 use crate::state::AppState;
 use crate::Bot;
 
-/// Maximum attempts for a retried Telegram call.
+/// Maximum attempts for a Telegram call retried on network failures.
 pub const MAX_ATTEMPTS: u32 = 3;
 
 /// Backoff before each retry after the first attempt; the length is the
@@ -21,31 +20,28 @@ pub const MAX_ATTEMPTS: u32 = 3;
 const BACKOFF: [Duration; MAX_ATTEMPTS as usize - 1] =
     [Duration::from_millis(500), Duration::from_millis(1000)];
 
-/// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying transient failures:
-/// `Network` errors with backoff from [`BACKOFF`] and `RetryAfter` by sleeping
-/// exactly as long as Telegram demands. Any other error returns immediately.
+/// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying `Network` errors with
+/// backoff from [`BACKOFF`]. Any other error returns immediately.
+///
+/// `RetryAfter` (429) never reaches here: the `Throttle` adaptor this crate's
+/// [`Bot`] is built with retries it internally, sleeping exactly as long as
+/// Telegram demands and without an attempt cap. A 429 is the adaptor's
+/// responsibility; this budget covers network failures only.
 pub async fn with_retry<T, F, Fut>(f: F) -> Result<T, RequestError>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T, RequestError>>,
 {
-    let mut network_attempts = 0u32;
+    let mut attempts = 0u32;
     loop {
         match f().await {
             Ok(v) => return Ok(v),
-            Err(RequestError::RetryAfter(secs)) => {
-                if network_attempts + 1 >= MAX_ATTEMPTS {
-                    return Err(RequestError::RetryAfter(secs));
-                }
-                tokio::time::sleep(secs.duration()).await;
-                network_attempts += 1;
-            }
             Err(err @ RequestError::Network(_)) => {
-                if network_attempts + 1 >= MAX_ATTEMPTS {
+                if attempts + 1 >= MAX_ATTEMPTS {
                     return Err(err);
                 }
-                tokio::time::sleep(BACKOFF[network_attempts as usize]).await;
-                network_attempts += 1;
+                tokio::time::sleep(BACKOFF[attempts as usize]).await;
+                attempts += 1;
             }
             Err(err) => return Err(err),
         }
@@ -60,38 +56,41 @@ pub fn is_privileged(member: &ChatMember) -> bool {
     )
 }
 
-/// Maps a chat's public kind to the wire [`ChatType`] used by the predicates.
-pub fn chat_type_of(chat: &Chat) -> ChatType {
-    match &chat.kind {
-        ChatKind::Public(public) => match public.kind {
-            PublicChatKind::Group => ChatType::Group,
-            PublicChatKind::Supergroup(_) => ChatType::Supergroup,
-            PublicChatKind::Channel(_) => ChatType::Channel,
-        },
-        ChatKind::Private(_) => ChatType::Private,
-    }
-}
-
-/// Whether the bot itself can unpin in `chat_type`.
+/// Whether the bot itself can unpin in `chat`.
 ///
 /// - Supergroup: bot must be an administrator with `can_pin_messages`.
 /// - Basic group: an administrator bot does not carry `can_pin_messages`, so
 ///   the check falls back to the chat's default member permissions.
 /// - Anything else: false.
 pub fn bot_can_unpin(
-    chat_type: ChatType,
+    chat: &Chat,
     bot_member: &ChatMember,
     default_permissions: Option<ChatPermissions>,
 ) -> bool {
-    match chat_type {
-        ChatType::Supergroup => matches!(&bot_member.kind,
-            ChatMemberKind::Administrator(a) if a.can_pin_messages),
-        ChatType::Group => {
-            matches!(bot_member.kind, ChatMemberKind::Administrator(_))
-                && default_permissions.is_some_and(|p| p.can_pin_messages())
-        }
-        _ => false,
+    if chat.is_supergroup() {
+        matches!(&bot_member.kind,
+            ChatMemberKind::Administrator(a) if a.can_pin_messages)
+    } else if chat.is_group() {
+        matches!(bot_member.kind, ChatMemberKind::Administrator(_))
+            && default_permissions.is_some_and(|p| p.can_pin_messages())
+    } else {
+        false
     }
+}
+
+/// The default member permissions when `chat` is a basic group, `None`
+/// otherwise: only a basic group keeps the pin right there, because an
+/// administrator bot in one carries no `can_pin_messages` of its own.
+pub async fn basic_group_permissions(
+    bot: &Bot,
+    chat: &Chat,
+) -> Result<Option<ChatPermissions>, RequestError> {
+    if !chat.is_group() {
+        return Ok(None);
+    }
+    Ok(with_retry(|| bot.get_chat(chat.id).send())
+        .await?
+        .permissions())
 }
 
 /// Handler for automatically forwarded channel posts: unpins them in enabled
@@ -107,6 +106,41 @@ pub async fn auto_unpin(bot: Bot, msg: Message, state: AppState) -> ResponseResu
         msg.chat.id
     );
     unpin_with_retry(&bot, msg.chat.id, msg.id, &state).await;
+    Ok(())
+}
+
+/// The `(enabled, replacement)` chat ids a chat-migration message moves the
+/// enabled set between, or `None` for a message that is not one.
+///
+/// A basic group upgraded to a supergroup gets a new id, so an entry keyed by
+/// the old one would never match an update again: the bot would silently stop
+/// unpinning there. Telegram reports the pair on the migration service
+/// message, in both directions, depending on which side of the upgrade the
+/// message was delivered on.
+fn migration_pair(msg: &Message) -> Option<(ChatId, ChatId)> {
+    match msg.chat_migration()? {
+        // The service message in the upgraded supergroup names the old group.
+        ChatMigration::From { chat_id } => Some((*chat_id, msg.chat.id)),
+        // Legacy shape: the last message in the old group names the new one.
+        ChatMigration::To { chat_id } => Some((msg.chat.id, *chat_id)),
+    }
+}
+
+/// Keeps the enabled set following a basic group upgraded to a supergroup.
+///
+/// `unpin_with_retry` covers the remaining race, where the upgrade lands
+/// between receiving an update and sending its unpin request to the old id.
+pub async fn chat_migrated(msg: Message, state: AppState) -> ResponseResult<()> {
+    // The dispatcher branch filters on the same condition; there is nothing
+    // to do for a message that is not a migration.
+    let Some((old, new)) = migration_pair(&msg) else {
+        return Ok(());
+    };
+    match state.replace_and_save(old, new) {
+        Ok(true) => log::info!("chat {old} upgraded to {new}; migrating enabled state"),
+        Ok(false) => log::debug!("chat {old} was not enabled; nothing to migrate to {new}"),
+        Err(e) => log::error!("failed to persist migration {old} -> {new}: {e}"),
+    }
     Ok(())
 }
 
@@ -141,22 +175,15 @@ pub async fn my_chat_member(
     if !state.contains(chat_id) {
         return Ok(());
     }
-    let chat_type = chat_type_of(&upd.chat);
-    // Basic groups carry no pin right on the bot's own membership; theirs
-    // lives in the chat's default member permissions, exactly as in /enable.
-    let default_permissions = if chat_type == ChatType::Group {
-        match with_retry(|| bot.get_chat(chat_id).send()).await {
-            Ok(info) => info.permissions(),
-            // A transient failure must not flip state.
-            Err(e) => {
-                log::warn!("get_chat failed for chat {chat_id} on rights change: {e}");
-                return Ok(());
-            }
+    // A transient failure must not flip state.
+    let permissions = match basic_group_permissions(&bot, &upd.chat).await {
+        Ok(permissions) => permissions,
+        Err(e) => {
+            log::warn!("get_chat failed for chat {chat_id} on rights change: {e}");
+            return Ok(());
         }
-    } else {
-        None
     };
-    if bot_can_unpin(chat_type, &upd.new_chat_member, default_permissions) {
+    if bot_can_unpin(&upd.chat, &upd.new_chat_member, permissions) {
         return Ok(());
     }
 
@@ -181,6 +208,38 @@ pub async fn my_chat_member(
     Ok(())
 }
 
+/// What an `unpinChatMessage` failure means for [`unpin_with_retry`].
+#[derive(Debug, PartialEq)]
+enum UnpinFailure {
+    /// The group was upgraded to a supergroup; retry against the new id.
+    Migrated(ChatId),
+    /// The bot lost the pin right; only an admin can fix this.
+    NoRights,
+    /// The bot is no longer in the chat.
+    ChatGone,
+    /// The goal already holds: nothing is pinned any more.
+    AlreadyDone,
+    /// Anything else, including network failures that outlived the retries.
+    Fatal,
+}
+
+/// Classifies an unpin failure by the only thing the caller can do about it.
+/// Telegram reports some of these ambiguously, so this mapping is the contract
+/// [`unpin_with_retry`] relies on.
+fn classify(err: &RequestError) -> UnpinFailure {
+    match err {
+        RequestError::MigrateToChatId(new_id) => UnpinFailure::Migrated(*new_id),
+        RequestError::Api(teloxide::ApiError::NotEnoughRightsToManagePins)
+        | RequestError::Api(teloxide::ApiError::NotEnoughRightsToPinMessage) => {
+            UnpinFailure::NoRights
+        }
+        RequestError::Api(teloxide::ApiError::ChatNotFound) => UnpinFailure::ChatGone,
+        // Nothing left to unpin: see `nothing_to_unpin`.
+        RequestError::Api(err) if nothing_to_unpin(err) => UnpinFailure::AlreadyDone,
+        _ => UnpinFailure::Fatal,
+    }
+}
+
 /// Unpins `message_id` with retry; migrates enabled-chat state when the group
 /// was upgraded to a supergroup.
 async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, state: &AppState) {
@@ -192,42 +251,44 @@ async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, sta
                 log::info!("unpinned message {message_id} in chat {chat_id}");
                 return;
             }
-            Err(RequestError::MigrateToChatId(new_id)) => {
-                if migrated {
-                    log::error!("chat {chat_id} migrated twice; giving up");
+            Err(err) => match classify(&err) {
+                UnpinFailure::Migrated(new_id) => {
+                    if migrated {
+                        log::error!("chat {chat_id} migrated twice; giving up");
+                        return;
+                    }
+                    log::info!("chat {chat_id} migrated to {new_id}; migrating state");
+                    match state.replace_and_save(chat_id, new_id) {
+                        Ok(true) => log::info!("enabled state migrated {chat_id} -> {new_id}"),
+                        Ok(false) => {
+                            log::warn!("chat {chat_id} was not in enabled state during migration")
+                        }
+                        Err(e) => {
+                            log::error!("failed to persist migration {chat_id} -> {new_id}: {e}")
+                        }
+                    }
+                    migrated = true;
+                    target = new_id;
+                }
+                UnpinFailure::NoRights => {
+                    log::warn!(
+                        "bot lacks pin rights in chat {chat_id}; re-run /enable after granting them"
+                    );
                     return;
                 }
-                log::info!("chat {chat_id} migrated to {new_id}; migrating state");
-                match state.replace_and_save(chat_id, new_id) {
-                    Ok(true) => log::info!("enabled state migrated {chat_id} -> {new_id}"),
-                    Ok(false) => {
-                        log::warn!("chat {chat_id} was not in enabled state during migration")
-                    }
-                    Err(e) => log::error!("failed to persist migration {chat_id} -> {new_id}: {e}"),
+                UnpinFailure::ChatGone => {
+                    log::warn!("chat {chat_id} not found while unpinning");
+                    return;
                 }
-                migrated = true;
-                target = new_id;
-            }
-            Err(RequestError::Api(teloxide::ApiError::NotEnoughRightsToManagePins))
-            | Err(RequestError::Api(teloxide::ApiError::NotEnoughRightsToPinMessage)) => {
-                log::warn!(
-                    "bot lacks pin rights in chat {chat_id}; re-run /enable after granting them"
-                );
-                return;
-            }
-            Err(RequestError::Api(teloxide::ApiError::ChatNotFound)) => {
-                log::warn!("chat {chat_id} not found while unpinning");
-                return;
-            }
-            // Nothing left to unpin: see `nothing_to_unpin`.
-            Err(RequestError::Api(err)) if nothing_to_unpin(&err) => {
-                log::debug!("message {message_id} in chat {chat_id} is not pinned");
-                return;
-            }
-            Err(e) => {
-                log::error!("unpin failed in chat {chat_id}: {e}");
-                return;
-            }
+                UnpinFailure::AlreadyDone => {
+                    log::debug!("message {message_id} in chat {chat_id} is not pinned");
+                    return;
+                }
+                UnpinFailure::Fatal => {
+                    log::error!("unpin failed in chat {chat_id}: {err}");
+                    return;
+                }
+            },
         }
     }
 }
@@ -235,6 +296,7 @@ async fn unpin_with_retry(bot: &Bot, chat_id: ChatId, message_id: MessageId, sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::EnabledChats;
     use std::sync::atomic::{AtomicU32, Ordering};
     use teloxide::types::{ChatMemberKind, ChatMemberStatus, User};
 
@@ -368,17 +430,105 @@ mod tests {
         Some(p)
     }
 
+    const OLD_CHAT: i64 = -599075523;
+    const NEW_CHAT: i64 = -1001555296434;
+
+    /// Parses a `Message` fixture; `serde_json` deserializes teloxide's
+    /// message types, which is the only way to build one without a network.
+    fn message(json: &str) -> Message {
+        serde_json::from_str(json).expect("message fixture")
+    }
+
+    /// The migration service message Telegram delivers in the upgraded
+    /// supergroup, whose `migrate_from_chat_id` names the old group.
+    fn upgrade_message() -> Message {
+        message(&format!(
+            r#"{{"chat":{{"id":{NEW_CHAT},"title":"test","type":"supergroup"}},
+                "date":1629404938,
+                "from":{{"first_name":"n","id":729497414,"is_bot":true,"username":"unpinbot"}},
+                "message_id":1,"migrate_from_chat_id":{OLD_CHAT}}}"#
+        ))
+    }
+
     #[test]
-    fn unpin_failures_that_mean_already_unpinned() {
+    fn migration_messages_name_the_old_and_the_new_chat() {
+        assert_eq!(
+            migration_pair(&upgrade_message()),
+            Some((ChatId(OLD_CHAT), ChatId(NEW_CHAT)))
+        );
+
+        // Legacy shape: the last message in the old group names the new one.
+        let legacy = message(&format!(
+            r#"{{"chat":{{"id":{OLD_CHAT},"title":"test","type":"group"}},
+                "date":1629404938,
+                "from":{{"first_name":"n","id":729497414,"is_bot":true,"username":"unpinbot"}},
+                "message_id":2,"migrate_to_chat_id":{NEW_CHAT}}}"#
+        ));
+        assert_eq!(
+            migration_pair(&legacy),
+            Some((ChatId(OLD_CHAT), ChatId(NEW_CHAT)))
+        );
+
+        // An ordinary message carries no migration.
+        let plain = message(&format!(
+            r#"{{"chat":{{"id":{OLD_CHAT},"title":"test","type":"group"}},
+                "date":1,"message_id":3,"text":"hi"}}"#
+        ));
+        assert_eq!(migration_pair(&plain), None);
+    }
+
+    #[tokio::test]
+    async fn upgrade_message_moves_the_enabled_entry_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, format!(r#"{{"enabled_chats":[{OLD_CHAT}]}}"#)).unwrap();
+        let state = AppState::new(EnabledChats::load(&path).expect("state loads"));
+
+        chat_migrated(upgrade_message(), state).await.unwrap();
+
+        let reloaded = EnabledChats::load(&path).expect("state reloads");
+        assert!(
+            reloaded.contains(ChatId(NEW_CHAT)),
+            "upgraded chat is enabled"
+        );
+        assert!(!reloaded.contains(ChatId(OLD_CHAT)), "old chat id is gone");
+    }
+
+    #[test]
+    fn unpin_failures_are_classified_by_what_the_caller_can_do() {
         use teloxide::ApiError;
-        assert!(nothing_to_unpin(&ApiError::MessageIdInvalid));
-        assert!(nothing_to_unpin(&ApiError::Unknown(
-            "Bad Request: message to unpin not found".to_owned()
-        )));
-        assert!(!nothing_to_unpin(&ApiError::Unknown(
-            "Bad Request: nope".to_owned()
-        )));
-        assert!(!nothing_to_unpin(&ApiError::ChatNotFound));
+        assert_eq!(
+            classify(&RequestError::MigrateToChatId(ChatId(-1001234567890))),
+            UnpinFailure::Migrated(ChatId(-1001234567890))
+        );
+        for api in [
+            ApiError::NotEnoughRightsToManagePins,
+            ApiError::NotEnoughRightsToPinMessage,
+        ] {
+            assert_eq!(classify(&RequestError::Api(api)), UnpinFailure::NoRights);
+        }
+        assert_eq!(
+            classify(&RequestError::Api(ApiError::ChatNotFound)),
+            UnpinFailure::ChatGone
+        );
+        // The two shapes of "there is nothing pinned any more".
+        assert_eq!(
+            classify(&RequestError::Api(ApiError::MessageIdInvalid)),
+            UnpinFailure::AlreadyDone
+        );
+        assert_eq!(
+            classify(&RequestError::Api(ApiError::Unknown(
+                "Bad Request: message to unpin not found".to_owned()
+            ))),
+            UnpinFailure::AlreadyDone
+        );
+        // An unrelated failure must not pass for a completed unpin.
+        assert_eq!(
+            classify(&RequestError::Api(ApiError::Unknown(
+                "Bad Request: nope".to_owned()
+            ))),
+            UnpinFailure::Fatal
+        );
     }
 
     #[test]
@@ -390,42 +540,47 @@ mod tests {
         assert!(!is_privileged(&member(ChatMemberKind::Left)));
     }
 
+    /// A chat parsed from the wire format: these structs have no public
+    /// constructor and far more fields than the predicates below look at.
+    fn chat(kind: &str) -> Chat {
+        let json = if kind == "private" {
+            r#"{"id":42,"type":"private","first_name":"Test"}"#.to_owned()
+        } else {
+            format!(r#"{{"id":-1001234567890,"title":"Test","type":"{kind}"}}"#)
+        };
+        serde_json::from_str(&json).expect("chat fixture")
+    }
+
     #[test]
     fn supergroup_requires_admin_pin_right() {
+        let supergroup = chat("supergroup");
         let bot_member = member(admin(true));
-        assert!(bot_can_unpin(ChatType::Supergroup, &bot_member, None));
+        assert!(bot_can_unpin(&supergroup, &bot_member, None));
         let bot_member = member(admin(false));
-        assert!(!bot_can_unpin(ChatType::Supergroup, &bot_member, None));
+        assert!(!bot_can_unpin(&supergroup, &bot_member, None));
         let bot_member = member(regular());
-        assert!(!bot_can_unpin(ChatType::Supergroup, &bot_member, None));
+        assert!(!bot_can_unpin(&supergroup, &bot_member, None));
     }
 
     #[test]
     fn group_requires_default_pin_permission() {
+        let group = chat("group");
         let bot_member = member(admin(false)); // basic-group admins carry no can_pin field
-        assert!(bot_can_unpin(
-            ChatType::Group,
-            &bot_member,
-            pin_permissions(true)
-        ));
-        assert!(!bot_can_unpin(
-            ChatType::Group,
-            &bot_member,
-            pin_permissions(false)
-        ));
-        assert!(!bot_can_unpin(ChatType::Group, &bot_member, None));
+        assert!(bot_can_unpin(&group, &bot_member, pin_permissions(true)));
+        assert!(!bot_can_unpin(&group, &bot_member, pin_permissions(false)));
+        assert!(!bot_can_unpin(&group, &bot_member, None));
     }
 
     #[test]
     fn other_chat_types_are_never_unpinnable() {
         let bot_member = member(admin(true));
         assert!(!bot_can_unpin(
-            ChatType::Private,
+            &chat("private"),
             &bot_member,
             pin_permissions(true)
         ));
         assert!(!bot_can_unpin(
-            ChatType::Channel,
+            &chat("channel"),
             &bot_member,
             pin_permissions(true)
         ));

@@ -22,11 +22,8 @@ type Bot = Throttle<DefaultParseMode<teloxide::Bot>>;
 
 fn make_bot(cfg: &Config) -> Bot {
     let mut builder = teloxide::net::default_reqwest_settings();
-    if let Ok(proxy) = std::env::var("TELOXIDE_PROXY") {
-        match reqwest::Proxy::all(&proxy) {
-            Ok(p) => builder = builder.proxy(p),
-            Err(e) => fatal(format!("invalid TELOXIDE_PROXY {proxy:?}: {e}")),
-        }
+    if let Some(proxy) = cfg.proxy.clone() {
+        builder = builder.proxy(proxy);
     }
     let client = builder.build().expect("creating reqwest client");
     teloxide::Bot::with_client(cfg.token.clone(), client)
@@ -85,7 +82,7 @@ async fn setup_bot_profile(bot: &Bot, catalogs: &i18n::Catalogs) {
         .map(|(code, lang)| (Some(code), lang))
         .chain(std::iter::once((None, catalogs.resolve(None))));
     for (code, lang) in targets {
-        register_profile(bot, code, lang).await;
+        register_profile(bot, code, &lang).await;
     }
 }
 
@@ -171,12 +168,19 @@ fn build_handler(
         })
         .endpoint(unpin::auto_unpin);
 
+    // A basic group upgraded to a supergroup changes its chat id; follow it,
+    // or the enabled entry would point at a chat id no update carries again.
+    let migrate_branch = Update::filter_message()
+        .filter(|msg: Message| msg.chat_migration().is_some())
+        .endpoint(unpin::chat_migrated);
+
     // Rights changes: disabling the chat when the bot can no longer unpin
     // keeps the persisted set from going stale.
     let member_branch = Update::filter_my_chat_member().endpoint(unpin::my_chat_member);
 
     dptree::entry()
         .branch(unpin_branch)
+        .branch(migrate_branch)
         .branch(command_branch)
         .branch(member_branch)
 }
@@ -243,6 +247,13 @@ async fn run() {
         cfg.state_path.display()
     );
     let state = AppState::new(chats);
+    match state.verify_writable() {
+        Ok(()) => log::debug!("state file {} is writable", cfg.state_path.display()),
+        Err(e) => log::error!(
+            "state file {} is not writable: {e}; /enable and /disable will fail until this is fixed",
+            cfg.state_path.display()
+        ),
+    }
     let bot = make_bot(&cfg);
 
     // Fail fast on an unusable token or network instead of panicking later

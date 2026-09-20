@@ -1,12 +1,14 @@
 //! `/start` `/help` `/enable` `/disable` command handlers.
 
+use std::sync::Arc;
+
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatType, ReplyParameters};
+use teloxide::types::{ChatAction, ReplyParameters};
 use teloxide::utils::command::BotCommands;
 
 use crate::i18n::Lang;
 use crate::state::AppState;
-use crate::unpin::{bot_can_unpin, chat_type_of, is_privileged, with_retry};
+use crate::unpin::{basic_group_permissions, bot_can_unpin, is_privileged, with_retry};
 use crate::Bot;
 
 #[derive(BotCommands, Clone, Debug, PartialEq)]
@@ -38,10 +40,7 @@ async fn typing(bot: &Bot, msg: &Message) {
 
 /// Rejects non-group chats, returning true when the caller may proceed.
 async fn ensure_group(bot: &Bot, msg: &Message, lang: &Lang) -> ResponseResult<bool> {
-    if !matches!(
-        chat_type_of(&msg.chat),
-        ChatType::Group | ChatType::Supergroup
-    ) {
+    if !msg.chat.is_group() && !msg.chat.is_supergroup() {
         reply(bot, msg, &lang.error.not_group).await?;
         return Ok(false);
     }
@@ -79,17 +78,22 @@ async fn ensure_caller_admin(bot: &Bot, msg: &Message, lang: &Lang) -> ResponseR
     }
 }
 
-pub async fn start(bot: Bot, msg: Message, lang: Lang) -> ResponseResult<()> {
+pub async fn start(bot: Bot, msg: Message, lang: Arc<Lang>) -> ResponseResult<()> {
     typing(&bot, &msg).await;
     reply(&bot, &msg, &lang.start).await
 }
 
-pub async fn help(bot: Bot, msg: Message, lang: Lang) -> ResponseResult<()> {
+pub async fn help(bot: Bot, msg: Message, lang: Arc<Lang>) -> ResponseResult<()> {
     typing(&bot, &msg).await;
     reply(&bot, &msg, &lang.help).await
 }
 
-pub async fn enable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> ResponseResult<()> {
+pub async fn enable(
+    bot: Bot,
+    msg: Message,
+    lang: Arc<Lang>,
+    state: AppState,
+) -> ResponseResult<()> {
     typing(&bot, &msg).await;
     if !ensure_group(&bot, &msg, &lang).await? {
         return Ok(());
@@ -100,17 +104,13 @@ pub async fn enable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> Resp
 
     // Verify the bot itself may unpin here. Basic groups expose the pin right
     // via default chat permissions; supergroups via the bot admin rights.
-    let default_permissions = if chat_type_of(&msg.chat) == ChatType::Group {
-        match with_retry(|| bot.get_chat(msg.chat.id).send()).await {
-            Ok(info) => info.permissions(),
-            Err(e) => {
-                log::error!("get_chat failed in chat {}: {e}", msg.chat.id);
-                reply(&bot, &msg, &lang.error.retry_later).await?;
-                return Ok(());
-            }
+    let permissions = match basic_group_permissions(&bot, &msg.chat).await {
+        Ok(permissions) => permissions,
+        Err(e) => {
+            log::error!("get_chat failed in chat {}: {e}", msg.chat.id);
+            reply(&bot, &msg, &lang.error.retry_later).await?;
+            return Ok(());
         }
-    } else {
-        None
     };
     let bot_id = crate::bot_id();
     let bot_member = match with_retry(|| bot.get_chat_member(msg.chat.id, bot_id).send()).await {
@@ -121,7 +121,7 @@ pub async fn enable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> Resp
             return Ok(());
         }
     };
-    if !bot_can_unpin(chat_type_of(&msg.chat), &bot_member, default_permissions) {
+    if !bot_can_unpin(&msg.chat, &bot_member, permissions) {
         log::info!(
             "bot cannot unpin in chat {} (missing rights); /enable rejected",
             msg.chat.id
@@ -150,7 +150,12 @@ pub async fn enable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> Resp
     }
 }
 
-pub async fn disable(bot: Bot, msg: Message, lang: Lang, state: AppState) -> ResponseResult<()> {
+pub async fn disable(
+    bot: Bot,
+    msg: Message,
+    lang: Arc<Lang>,
+    state: AppState,
+) -> ResponseResult<()> {
     typing(&bot, &msg).await;
     if !ensure_group(&bot, &msg, &lang).await? {
         return Ok(());
@@ -184,7 +189,7 @@ pub async fn route_command(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    lang: Lang,
+    lang: Arc<Lang>,
     state: AppState,
 ) -> ResponseResult<()> {
     let sender = msg
