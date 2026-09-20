@@ -10,3 +10,10 @@ services:
     volumes:
       - ./pers_data:/app/pers_data
     container_name: unpin
+    # `restart: always` plus json-file logging fills the host disk over months;
+    # cap it here so a long-lived deployment needs no host-side logrotate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

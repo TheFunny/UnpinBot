@@ -24,7 +24,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
 
-  # The Dockerfile's base images (rust:1-alpine, alpine:3.20).
+  # The Dockerfile's base images (rust:1-alpine, alpine:3.24).
   - package-ecosystem: docker
     directory: /
     schedule:

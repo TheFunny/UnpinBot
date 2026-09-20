@@ -78,7 +78,10 @@ jobs:
     needs: should-build
     if: needs.should-build.outputs.build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Raised from 60 for the emulated arm64 leg: the final stage is a bare
+    # Alpine, so nothing needs a native runner, but a cold QEMU build of the
+    # fat-LTO dependency tree is several times slower than the amd64 one.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -110,6 +113,10 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
+          # arm64 covers Raspberry Pi and arm NAS deployments, which cannot run
+          # an amd64-only manifest. It is emulated, hence nothing in the
+          # Dockerfile may depend on the build architecture.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Fixed scope: the gha backend defaults to the current git ref, which

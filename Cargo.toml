@@ -28,6 +28,11 @@ tempfile = "3"
 # makes the retry backoff assertions instant and deterministic.
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }
 
+# The same lints CI denies, surfaced by a plain local `cargo clippy` instead of
+# only on a CI round trip. Warnings, not denials: CI is the gate.
+[lints.clippy]
+all = "warn"
+
 [profile.release]
 strip = true
 lto = "fat"
