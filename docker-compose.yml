@@ -5,7 +5,7 @@ services:
     environment:
       TELOXIDE_TOKEN: ${TELOXIDE_TOKEN}
       # UNPINBOT_STATE_PATH: pers_data/state.json
-      # RUST_LOG: info
+      # RUST_LOG: warn
       LOCAL_USER_ID: '1000'
     volumes:
       - ./pers_data:/app/pers_data

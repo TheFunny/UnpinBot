@@ -12,7 +12,7 @@ use teloxide::RequestError;
 use crate::state::AppState;
 use crate::Bot;
 
-/// Maximum attempts for a Telegram call retried on network failures.
+/// Maximum attempts for a Telegram call retried on transient failures.
 pub const MAX_ATTEMPTS: u32 = 3;
 
 /// Backoff before each retry after the first attempt; the length is the
@@ -20,13 +20,37 @@ pub const MAX_ATTEMPTS: u32 = 3;
 const BACKOFF: [Duration; MAX_ATTEMPTS as usize - 1] =
     [Duration::from_millis(500), Duration::from_millis(1000)];
 
-/// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying `Network` errors with
+/// Bot API descriptions that mean "the same request may well succeed if
+/// repeated": Telegram's own gateway and server failures. `ApiError` carries
+/// no HTTP status, so the description is the only signal.
+const TRANSIENT_API_ERRORS: [&str; 4] = [
+    "Bad Gateway",
+    "Gateway Timeout",
+    "Internal Server Error",
+    "Service Unavailable",
+];
+
+/// Whether repeating the exact same request could succeed.
+///
+/// `RetryAfter` is deliberately absent: 429 is the `Throttle` adaptor's
+/// business, see [`with_retry`].
+pub fn transient_failure(err: &RequestError) -> bool {
+    match err {
+        RequestError::Network(_) => true,
+        RequestError::Api(teloxide::ApiError::Unknown(text)) => {
+            TRANSIENT_API_ERRORS.iter().any(|s| text.contains(s))
+        }
+        _ => false,
+    }
+}
+
+/// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying [`transient_failure`]s with
 /// backoff from [`BACKOFF`]. Any other error returns immediately.
 ///
 /// `RetryAfter` (429) never reaches here: the `Throttle` adaptor this crate's
 /// [`Bot`] is built with retries it internally, sleeping exactly as long as
 /// Telegram demands and without an attempt cap. A 429 is the adaptor's
-/// responsibility; this budget covers network failures only.
+/// responsibility; this budget covers network and gateway failures only.
 pub async fn with_retry<T, F, Fut>(f: F) -> Result<T, RequestError>
 where
     F: Fn() -> Fut,
@@ -36,7 +60,7 @@ where
     loop {
         match f().await {
             Ok(v) => return Ok(v),
-            Err(err @ RequestError::Network(_)) => {
+            Err(err) if transient_failure(&err) => {
                 if attempts + 1 >= MAX_ATTEMPTS {
                     return Err(err);
                 }
@@ -367,6 +391,45 @@ mod tests {
             1,
             "permanent errors must not be retried"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_gateway_failures_but_not_other_api_errors() {
+        use teloxide::ApiError;
+
+        // A 502 from Telegram's edge is as repeatable as a dropped connection.
+        let calls = AtomicU32::new(0);
+        let start = tokio::time::Instant::now();
+        let result = with_retry(|| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(RequestError::Api(ApiError::Unknown(
+                        "Bad Gateway".to_owned(),
+                    )))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(start.elapsed(), BACKOFF[0]);
+
+        // An unrecognised description is not assumed to be repeatable.
+        let calls = AtomicU32::new(0);
+        let result = with_retry(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<(), _>(RequestError::Api(ApiError::Unknown(
+                    "Bad Request: nope".to_owned(),
+                )))
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     fn user(id: u64) -> User {

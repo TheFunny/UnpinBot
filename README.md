@@ -15,7 +15,7 @@ All settings are passed via environment variables:
 | `TELOXIDE_TOKEN` | yes | — | Bot token from @BotFather |
 | `TELOXIDE_PROXY` | no | — | Proxy for all Telegram requests, e.g. `socks5://127.0.0.1:1080` |
 | `UNPINBOT_STATE_PATH` | no | `pers_data/state.json` | Enabled-chats state file |
-| `RUST_LOG` | no | `warn` | Log level (`info`, `debug`, ...) |
+| `RUST_LOG` | no | `info` | Log level (`warn` for quiet, `debug` for detail) |
 | `LOCAL_USER_ID` | no | `9001` | UID to run as inside the container (Docker only) |
 
 ## Deployment

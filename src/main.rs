@@ -13,6 +13,7 @@ use teloxide::adaptors::{DefaultParseMode, Throttle};
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, BotCommandScope, ChatAdministratorRights, ParseMode, UserId};
 use teloxide::update_listeners::{polling_default, UpdateListener as _};
+use teloxide::RequestError;
 
 use config::Config;
 use state::{AppState, EnabledChats};
@@ -20,8 +21,17 @@ use unpin::with_retry;
 
 type Bot = Throttle<DefaultParseMode<teloxide::Bot>>;
 
+/// Total HTTP timeout for every request.
+///
+/// The default is 17s, and the long poll keeps a `getUpdates` request open for
+/// up to 10s of it: only 7s are left for the connection and the response to
+/// come back, so a laggy route turns healthy polls into `Network(TimedOut)`
+/// and a retry storm. 30s keeps a wide margin over the poll while still
+/// failing over a truly dead connection.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn make_bot(cfg: &Config) -> Bot {
-    let mut builder = teloxide::net::default_reqwest_settings();
+    let mut builder = teloxide::net::default_reqwest_settings().timeout(REQUEST_TIMEOUT);
     if let Some(proxy) = cfg.proxy.clone() {
         builder = builder.proxy(proxy);
     }
@@ -224,11 +234,13 @@ fn bot_id() -> UserId {
 }
 
 async fn run() {
-    // Defaults to warn; RUST_LOG overrides (parse after the default so the
-    // env directive replaces it — the reverse order silently swallows it).
+    // Defaults to info, so a deployment shows the startup lines and the one
+    // line per channel post without any configuration; RUST_LOG overrides
+    // (parse after the default so the env directive replaces it — the reverse
+    // order silently swallows it).
     let mut logger = pretty_env_logger::formatted_builder();
     logger
-        .filter_level(log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Info)
         .parse_default_env();
     logger.init();
 
@@ -284,14 +296,34 @@ async fn run() {
         })
         .enable_ctrlc_handler()
         .build()
-        .dispatch_with_listener(
-            listener,
-            teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
-                "an error from the update listener",
-            ),
-        )
+        .dispatch_with_listener(listener, std::sync::Arc::new(log_listener_error))
         .await;
     log::info!("dispatcher stopped");
+}
+
+/// Logs a failure the update listener reported, at [`listener_error_level`].
+async fn log_listener_error(err: RequestError) {
+    match listener_error_level(&err) {
+        log::Level::Warn => {
+            log::warn!("update listener retrying after a transient failure: {err}")
+        }
+        _ => log::error!("an error from the update listener: {err}"),
+    }
+}
+
+/// The level a listener failure deserves: a warning when the long poll heals it
+/// by itself — it sleeps and polls again for every error it reports, including
+/// Telegram's own `RetryAfter` pause — and an error when it does not.
+///
+/// Treating the self-healing ones as errors buries the lines an operator must
+/// act on (a second poller holding the token, a bad token, a malformed
+/// response) under a night of flaky-routing noise.
+fn listener_error_level(err: &RequestError) -> log::Level {
+    if matches!(err, RequestError::RetryAfter(_)) || unpin::transient_failure(err) {
+        log::Level::Warn
+    } else {
+        log::Level::Error
+    }
 }
 
 fn main() {
@@ -302,4 +334,44 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
     rt.block_on(run());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use teloxide::types::Seconds;
+
+    /// The long poll holds a `getUpdates` request open for 10s, so the client
+    /// timeout is what decides whether a slow path is a retry storm: the stock
+    /// 17s left only 7s of slack for the connection and the response.
+    #[test]
+    fn request_timeout_leaves_slack_over_the_long_poll() {
+        const LONG_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+        assert!(REQUEST_TIMEOUT - LONG_POLL >= std::time::Duration::from_secs(15));
+    }
+
+    /// A flaky night must not read as a broken bot: what the poll loop heals on
+    /// its own is a warning, what needs a human stays an error.
+    #[test]
+    fn listener_failures_are_logged_by_who_heals_them() {
+        let self_healing = |err| {
+            assert_eq!(listener_error_level(&err), log::Level::Warn, "{err}");
+        };
+        let actionable = |err| {
+            assert_eq!(listener_error_level(&err), log::Level::Error, "{err}");
+        };
+
+        // The poll loop retries both by itself; the 429 pause is Telegram's.
+        self_healing(RequestError::RetryAfter(Seconds::from_seconds(5)));
+        self_healing(RequestError::Api(teloxide::ApiError::Unknown(
+            "Bad Gateway".to_owned(),
+        )));
+
+        // Actionable: something else is polling this token, or the request is
+        // simply not going to work.
+        actionable(RequestError::Api(
+            teloxide::ApiError::TerminatedByOtherGetUpdates,
+        ));
+        actionable(RequestError::Api(teloxide::ApiError::ChatNotFound));
+    }
 }
