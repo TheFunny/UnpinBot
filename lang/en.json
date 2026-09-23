@@ -1,5 +1,5 @@
 {
-    "start": "Welcome using <b>Unpin Bot</b>!\n\nThis bot is used to automatically unpin channel post forwarded into connected discussion group. To ensure its proper functionality, please give the bot permission to pin messages. \n\nUse /help for user instructions.",
+    "start":"Welcome to <b>Unpin Bot</b>!\n\nThis bot automatically unpins channel posts forwarded into connected discussion groups. To ensure its proper functionality, please give the bot permission to pin messages.\n\nUse /help for user instructions.",
     "help": "Help info:\n/start About this bot\n/help Show help info\n/enable Enable unpin\n/disable Disable unpin\n",
     "enable": "Successfully enabled.",
     "disable": "Successfully disabled.",
