@@ -18,5 +18,5 @@
         "enable": "Enable unpin",
         "disable": "Disable unpin"
     },
-    "description": "Unpin channel post forwarded into connected discussion group automatically."
+    "description":"Automatically unpins channel posts forwarded into connected discussion groups."
 }
