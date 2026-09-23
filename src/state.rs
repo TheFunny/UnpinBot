@@ -176,21 +176,19 @@ impl AppState {
         self.0.lock().expect("state poisoned").save()
     }
 
+    /// Moves `old` to `new` and persists. Returns false (and changes
+    /// nothing) when `old` was not enabled.
+    ///
+    /// A failed save does NOT roll back, unlike insert/remove: after a
+    /// migration the old id is dead, and gating future updates on it would
+    /// silence auto-unpin for that chat forever. The move stays in memory
+    /// until the next successful save (any later state change) persists it.
     pub fn replace_and_save(&self, old: ChatId, new: ChatId) -> Result<bool, String> {
         let mut guard = self.0.lock().expect("state poisoned");
-        // `new` may already be enabled (a racing /enable on the upgraded id);
-        // the rollback has to restore that membership too.
-        let had_new = guard.contains(new);
         if !guard.replace(old, new) {
             return Ok(false);
         }
-        if let Err(e) = guard.save() {
-            guard.replace(new, old);
-            if had_new {
-                guard.insert(new);
-            }
-            return Err(e);
-        }
+        guard.save()?;
         Ok(true)
     }
 }
@@ -301,19 +299,23 @@ mod tests {
     }
 
     #[test]
-    fn replace_and_save_rollback_keeps_a_preexisting_new_id() {
-        // Same unwritable-path trick as above; the set starts as {1, 2}.
+    fn replace_and_save_keeps_the_new_id_when_save_fails() {
+        // Migration is a world-state sync: rolling back to the dead id would
+        // gate every future update of the migrated chat out of auto_unpin.
+        // Same unwritable-path trick as above; the set starts as {1}.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, "x").unwrap();
         let bad_path = blocker.join("deep/state.json");
         let mut chats = EnabledChats::load(&bad_path).expect("ENOTDIR loads as empty");
         assert!(chats.insert(ChatId(1)));
-        assert!(chats.insert(ChatId(2)));
         let app = AppState::new(chats);
         assert!(app.replace_and_save(ChatId(1), ChatId(2)).is_err());
-        assert!(app.contains(ChatId(1)), "old id restored");
-        assert!(app.contains(ChatId(2)), "pre-existing new id kept");
+        assert!(!app.contains(ChatId(1)), "the dead id must not return");
+        assert!(
+            app.contains(ChatId(2)),
+            "the live id survives a failed save"
+        );
     }
 
     #[cfg(unix)]
