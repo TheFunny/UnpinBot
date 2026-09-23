@@ -205,15 +205,25 @@ pub async fn my_chat_member(
     if !state.contains(chat_id) {
         return Ok(());
     }
-    // A transient failure must not flip state.
-    let permissions = match basic_group_permissions(&bot, &upd.chat).await {
-        Ok(permissions) => permissions,
-        Err(e) => {
-            log::warn!("get_chat failed for chat {chat_id} on rights change: {e}");
-            return Ok(());
+    // Kicked or gone: the rights question answers itself — and for a basic
+    // group the get_chat below would now fail permanently (the bot can no
+    // longer see the chat), which must not be mistaken for a transient error
+    // that leaves the chat "enabled" on disk forever.
+    let can_unpin = match &upd.new_chat_member.kind {
+        ChatMemberKind::Left | ChatMemberKind::Banned(_) => false,
+        _ => {
+            // A transient failure must not flip state.
+            let permissions = match basic_group_permissions(&bot, &upd.chat).await {
+                Ok(permissions) => permissions,
+                Err(e) => {
+                    log::warn!("get_chat failed for chat {chat_id} on rights change: {e}");
+                    return Ok(());
+                }
+            };
+            bot_can_unpin(&upd.chat, &upd.new_chat_member, permissions)
         }
     };
-    if bot_can_unpin(&upd.chat, &upd.new_chat_member, permissions) {
+    if can_unpin {
         return Ok(());
     }
 
