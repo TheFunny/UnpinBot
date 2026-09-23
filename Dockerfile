@@ -7,7 +7,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
-    && cargo build --release
+    && cargo build --release --locked
 
 # 2. Real sources last: only our crate recompiles on source changes. Cargo's
 #    freshness check is mtime-based; the COPY'd host files usually predate the
@@ -20,7 +20,7 @@ RUN mkdir -p src \
 COPY lang/ ./lang/
 COPY src/ ./src/
 RUN touch src/*.rs \
-    && cargo build --release \
+    && cargo build --release --locked \
     && cp target/release/unpinbot /unpinbot
 
 FROM alpine:3.24

@@ -18,6 +18,8 @@ on:
       - .dockerignore
       - Cargo.toml
       - Cargo.lock
+      - src/**
+      - lang/**
       - .github/workflows/docker.yml
 
 env:
