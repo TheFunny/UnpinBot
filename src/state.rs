@@ -35,11 +35,11 @@ impl EnabledChats {
                 file.enabled_chats.into_iter().map(ChatId).collect()
             }
             // A path component is a file, so `save()` can still create the
-            // real directories later; treat it like a missing file. Windows
-            // reports kind NotFound (raw 3), so the arm above already covers
-            // it; Linux ENOTDIR has no io::ErrorKind at MSRV 1.82 — match it
-            // by raw code 20.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20) => {
+            // real directories later; treat "not a directory" like "missing".
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::NotADirectory =>
+            {
                 HashSet::new()
             }
             Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
@@ -99,8 +99,20 @@ impl EnabledChats {
         // leave an empty file, which the next start then refuses to load.
         // ponytail: the file is synced, the directory entry is not — a lost
         // rename merely reverts to the previous state, which is fine here.
-        fs::File::create(&tmp)
+        // `create_new` (O_EXCL): the fixed tmp name must not follow a planted
+        // symlink; a stale tmp from an interrupted save is cleared first.
+        let _ = fs::remove_file(&tmp);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
             .and_then(|mut file| {
+                // Owner-only: the state names every group using the bot.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+                }
                 file.write_all(&bytes)?;
                 file.sync_all()
             })
@@ -302,5 +314,20 @@ mod tests {
         assert!(app.replace_and_save(ChatId(1), ChatId(2)).is_err());
         assert!(app.contains(ChatId(1)), "old id restored");
         assert!(app.contains(ChatId(2)), "pre-existing new id kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_state_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut state = EnabledChats::load(&path).unwrap();
+        state.insert(ChatId(1));
+        state.save().unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

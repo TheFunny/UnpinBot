@@ -7,8 +7,8 @@ name: CI
 # profile the Docker image ships) + the cargo-audit dependency gate.
 #
 # Every action is pinned to a commit SHA (Dependabot keeps the pins current);
-# `dtolnay/rust-toolchain` deliberately stays on its channel ref, because the
-# ref itself is what selects the toolchain (`@stable` = install stable).
+# the Rust toolchain comes from the runner's own rustup instead of a
+# third-party action, so nothing unpinned selects the Rust version.
 
 on:
   push:
@@ -38,9 +38,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # The runner image ships rustup; updating stable keeps CI on the
+      # current toolchain without a third-party action in the loop.
+      - name: Toolchain
+        run: rustup update stable && rustup component add clippy rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # `--locked` on every cargo invocation: Cargo.lock is committed and the
       # released image is built from it, so a stale lock must fail here instead

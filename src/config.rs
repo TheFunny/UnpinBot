@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 /// Runtime configuration, sourced entirely from environment variables.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Config {
     /// Bot token from @BotFather, read from `TELOXIDE_TOKEN` (required).
     pub token: String,
@@ -37,6 +37,17 @@ fn defaulted(var: &str, default: &str) -> String {
     }
 }
 
+/// `url` with any `user:password@` replaced by `***@`: config errors reach
+/// stderr and `docker logs`, credentials must not.
+fn redacted(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme), Some(at)) if at > scheme => {
+            format!("{}***@{}", &url[..scheme + 3], &url[at + 1..])
+        }
+        _ => url.to_owned(),
+    }
+}
+
 /// Parses `TELOXIDE_PROXY` when it is set to something non-empty.
 fn proxy() -> Result<Option<reqwest::Proxy>, String> {
     let Ok(url) = std::env::var("TELOXIDE_PROXY") else {
@@ -46,9 +57,14 @@ fn proxy() -> Result<Option<reqwest::Proxy>, String> {
     if url.is_empty() {
         return Ok(None);
     }
-    reqwest::Proxy::all(url)
-        .map(Some)
-        .map_err(|e| format!("invalid TELOXIDE_PROXY {url:?}: {e}"))
+    // The reqwest error can carry the raw URL — credentials included — so
+    // only the redacted form is ever named here.
+    reqwest::Proxy::all(url).map(Some).map_err(|_| {
+        format!(
+            "invalid TELOXIDE_PROXY {}: expected scheme://[user:pass@]host[:port]",
+            redacted(&url)
+        )
+    })
 }
 
 impl Config {
@@ -142,5 +158,15 @@ mod tests {
             assert!(err.contains("TELOXIDE_PROXY"), "{err}");
             std::env::remove_var("TELOXIDE_PROXY");
         });
+    }
+
+    #[test]
+    fn proxy_error_messages_redact_credentials() {
+        assert_eq!(
+            redacted("socks5://user:pass@host:1080"),
+            "socks5://***@host:1080"
+        );
+        assert_eq!(redacted("http://host:1080"), "http://host:1080");
+        assert_eq!(redacted("not a url"), "not a url");
     }
 }
