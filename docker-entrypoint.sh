@@ -2,19 +2,19 @@
 set -e
 if [ "$(id -u)" = "0" ]; then
     UID_="${LOCAL_USER_ID:-9001}"
-    # `docker compose restart` / `docker restart` reuse the same container, so
-    # the passwd entry from the first boot persists: a second `adduser` exits 9
-    # and `set -e` would kill the container on every restart. Create only if
-    # missing; realign the UID otherwise so LOCAL_USER_ID changes still apply.
-    if id unpin > /dev/null 2>&1; then
-        # busybox adduser cannot modify; recreate is only safe via deluser on
-        # alpine: keep it simple by re-aligning through usermod-less approach.
-        if [ "$(id -u unpin)" != "$UID_" ]; then
-            deluser unpin 2>/dev/null || true
-            adduser -D -H -u "$UID_" -s /sbin/nologin unpin 2>/dev/null || true
-        fi
-    else
-        adduser -D -H -u "$UID_" -s /sbin/nologin unpin 2>/dev/null || true
+    # A root or malformed LOCAL_USER_ID would silently defeat (or crash
+    # confusingly) the privilege drop; fail here, naming the variable, while
+    # the operator still watches the logs. `su-exec` takes a plain numeric
+    # uid:gid without any passwd entry, so no user account is created.
+    case "$UID_" in
+        ''|*[!0-9]*)
+            echo "entrypoint: LOCAL_USER_ID must be numeric, got '$UID_'" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$UID_" -eq 0 ]; then
+        echo "entrypoint: LOCAL_USER_ID must be non-zero" >&2
+        exit 1
     fi
 
     # The state volume must be writable by the runtime user. Ensure the
@@ -24,10 +24,7 @@ if [ "$(id -u)" = "0" ]; then
     # from the bot itself.
     mkdir -p /app/pers_data 2>/dev/null || true
     # chown BOTH owner and group: `chown 1000 dir` leaves the group as-is
-    # (typically root/0 on bind mounts). The numeric-uid form of `su-exec`
-    # re-looks-up the passwd entry (getpwuid), so the process runs as
-    # unpin = 1000:1000 either way; the explicit user:group form is kept so
-    # it does not depend on the passwd entry existing.
+    # (typically root/0 on bind mounts).
     if ! chown -R "$UID_:$UID_" /app/pers_data 2>/dev/null; then
         echo "entrypoint: WARNING: chown /app/pers_data failed;" >&2
         echo "  the bot may be unable to persist state. Fix on the host:" >&2
