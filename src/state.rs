@@ -69,10 +69,12 @@ impl EnabledChats {
     }
 
     /// Moves an enabled chat id (group migrated to supergroup).
-    /// Returns false (and changes nothing) if `old` was not enabled.
+    /// Returns false (and changes nothing) if `old` was not enabled. `new`
+    /// already being enabled is still a change: the old id left the set.
     pub fn replace(&mut self, old: ChatId, new: ChatId) -> bool {
         if self.chats.remove(&old) {
-            self.chats.insert(new)
+            self.chats.insert(new);
+            true
         } else {
             false
         }
@@ -164,11 +166,17 @@ impl AppState {
 
     pub fn replace_and_save(&self, old: ChatId, new: ChatId) -> Result<bool, String> {
         let mut guard = self.0.lock().expect("state poisoned");
+        // `new` may already be enabled (a racing /enable on the upgraded id);
+        // the rollback has to restore that membership too.
+        let had_new = guard.contains(new);
         if !guard.replace(old, new) {
             return Ok(false);
         }
         if let Err(e) = guard.save() {
             guard.replace(new, old);
+            if had_new {
+                guard.insert(new);
+            }
             return Err(e);
         }
         Ok(true)
@@ -261,5 +269,38 @@ mod tests {
         assert!(app.insert_and_save(ChatId(9)).is_err());
         // Rollback: in-memory set must not contain the chat.
         assert!(!app.contains(ChatId(9)));
+    }
+
+    #[test]
+    fn replace_reports_a_change_when_only_the_old_id_leaves() {
+        // {old, new} both enabled — a racing /enable on the upgraded id —
+        // the old id leaving IS the change, and it must reach the disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        fs::write(&path, r#"{"enabled_chats":[1,2]}"#).unwrap();
+        let mut state = EnabledChats::load(&path).unwrap();
+        assert!(state.replace(ChatId(1), ChatId(2)));
+        assert!(!state.contains(ChatId(1)));
+        assert!(state.contains(ChatId(2)));
+        state.save().unwrap();
+        let reloaded = EnabledChats::load(&path).unwrap();
+        assert!(!reloaded.contains(ChatId(1)));
+        assert!(reloaded.contains(ChatId(2)));
+    }
+
+    #[test]
+    fn replace_and_save_rollback_keeps_a_preexisting_new_id() {
+        // Same unwritable-path trick as above; the set starts as {1, 2}.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, "x").unwrap();
+        let bad_path = blocker.join("deep/state.json");
+        let mut chats = EnabledChats::load(&bad_path).expect("ENOTDIR loads as empty");
+        assert!(chats.insert(ChatId(1)));
+        assert!(chats.insert(ChatId(2)));
+        let app = AppState::new(chats);
+        assert!(app.replace_and_save(ChatId(1), ChatId(2)).is_err());
+        assert!(app.contains(ChatId(1)), "old id restored");
+        assert!(app.contains(ChatId(2)), "pre-existing new id kept");
     }
 }

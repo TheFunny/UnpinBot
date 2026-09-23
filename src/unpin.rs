@@ -30,13 +30,13 @@ const TRANSIENT_API_ERRORS: [&str; 4] = [
     "Service Unavailable",
 ];
 
-/// Whether repeating the exact same request could succeed.
-///
-/// `RetryAfter` is deliberately absent: 429 is the `Throttle` adaptor's
-/// business, see [`with_retry`].
+/// Whether repeating the exact same request could succeed: a Telegram
+/// flood-wait ([`RequestError::RetryAfter`], honoured by [`with_retry`]), a
+/// dropped connection, or one of Telegram's own gateway errors.
 pub fn transient_failure(err: &RequestError) -> bool {
     match err {
         RequestError::Network(_) => true,
+        RequestError::RetryAfter(_) => true,
         RequestError::Api(teloxide::ApiError::Unknown(text)) => {
             TRANSIENT_API_ERRORS.iter().any(|s| text.contains(s))
         }
@@ -44,13 +44,15 @@ pub fn transient_failure(err: &RequestError) -> bool {
     }
 }
 
-/// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying [`transient_failure`]s with
-/// backoff from [`BACKOFF`]. Any other error returns immediately.
+/// Runs `f` up to [`MAX_ATTEMPTS`] times, retrying [`transient_failure`]s: a
+/// 429 waits exactly as long as Telegram demands, other transient failures
+/// wait the fixed backoff from [`BACKOFF`]. Any other error returns
+/// immediately.
 ///
-/// `RetryAfter` (429) never reaches here: the `Throttle` adaptor this crate's
-/// [`Bot`] is built with retries it internally, sleeping exactly as long as
-/// Telegram demands and without an attempt cap. A 429 is the adaptor's
-/// responsibility; this budget covers network and gateway failures only.
+/// The `Throttle` adaptor this crate's [`Bot`] is built with only queues the
+/// `send_*` family; `unpin_chat_message`/`get_chat*`/`set_my_*` pass straight
+/// through, so a flood-wait on those calls must be honoured here — dropping
+/// it would drop the unpin.
 pub async fn with_retry<T, F, Fut>(f: F) -> Result<T, RequestError>
 where
     F: Fn() -> Fut,
@@ -64,7 +66,11 @@ where
                 if attempts + 1 >= MAX_ATTEMPTS {
                     return Err(err);
                 }
-                tokio::time::sleep(BACKOFF[attempts as usize]).await;
+                let delay = match &err {
+                    RequestError::RetryAfter(secs) => secs.duration(),
+                    _ => BACKOFF[attempts as usize],
+                };
+                tokio::time::sleep(delay).await;
                 attempts += 1;
             }
             Err(err) => return Err(err),
@@ -430,6 +436,42 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Throttle only queues `send_*`; a flood-wait on an unwrapped method
+    /// reaches here and must sleep out Telegram's own pause.
+    #[tokio::test(start_paused = true)]
+    async fn retries_after_sleeping_out_telegrams_flood_wait() {
+        use teloxide::types::Seconds;
+
+        let calls = AtomicU32::new(0);
+        let start = tokio::time::Instant::now();
+        let result = with_retry(|| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(RequestError::RetryAfter(Seconds::from_seconds(5)))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(start.elapsed(), Duration::from_secs(5));
+
+        // The demanded pause shares the attempt budget: no unbounded loop.
+        let calls = AtomicU32::new(0);
+        let start = tokio::time::Instant::now();
+        let result = with_retry(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(RequestError::RetryAfter(Seconds::from_seconds(5))) }
+        })
+        .await;
+        assert!(matches!(result, Err(RequestError::RetryAfter(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS);
+        assert_eq!(start.elapsed(), Duration::from_secs(5) * (MAX_ATTEMPTS - 1));
     }
 
     fn user(id: u64) -> User {

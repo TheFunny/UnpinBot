@@ -319,7 +319,7 @@ async fn log_listener_error(err: RequestError) {
 /// act on (a second poller holding the token, a bad token, a malformed
 /// response) under a night of flaky-routing noise.
 fn listener_error_level(err: &RequestError) -> log::Level {
-    if matches!(err, RequestError::RetryAfter(_)) || unpin::transient_failure(err) {
+    if unpin::transient_failure(err) {
         log::Level::Warn
     } else {
         log::Level::Error
