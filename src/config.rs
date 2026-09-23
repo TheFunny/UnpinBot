@@ -62,7 +62,7 @@ fn proxy() -> Result<Option<reqwest::Proxy>, String> {
     reqwest::Proxy::all(url).map(Some).map_err(|_| {
         format!(
             "invalid TELOXIDE_PROXY {}: expected scheme://[user:pass@]host[:port]",
-            redacted(&url)
+            redacted(url)
         )
     })
 }

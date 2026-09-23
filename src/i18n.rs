@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Lang {
     pub start: String,
     pub help: String,
@@ -15,7 +15,7 @@ pub struct Lang {
     pub description: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Errors {
     pub not_group: String,
     pub not_admin: String,
@@ -26,7 +26,7 @@ pub struct Errors {
     pub retry_later: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Commands {
     pub start: String,
     pub help: String,
@@ -99,30 +99,34 @@ mod tests {
 
     #[test]
     fn embedded_catalogs_are_complete() {
+        // Every string in every catalog must be non-empty; walking the JSON
+        // keeps future keys covered without touching this test.
+        fn walk(code: &str, path: &str, value: &serde_json::Value) {
+            match value {
+                serde_json::Value::String(s) => {
+                    assert!(!s.is_empty(), "{code}: {path} is empty")
+                }
+                serde_json::Value::Object(map) => {
+                    for (key, value) in map {
+                        assert!(!key.is_empty(), "{code}: {path} has an empty key");
+                        walk(code, &format!("{path}.{key}"), value);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for value in items {
+                        walk(code, path, value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let catalogs = Catalogs::load().expect("catalogs parse");
         let codes: Vec<_> = catalogs.all().map(|(code, _)| code).collect();
         assert_eq!(codes, ["en", "zh"], "embedded language list changed");
-        for (code, lang) in catalogs.all() {
-            for (field, s) in [
-                ("start", &lang.start),
-                ("help", &lang.help),
-                ("enable", &lang.enable),
-                ("disable", &lang.disable),
-                ("description", &lang.description),
-                ("error.not_group", &lang.error.not_group),
-                ("error.not_admin", &lang.error.not_admin),
-                ("error.require_rights", &lang.error.require_rights),
-                ("error.rights_revoked", &lang.error.rights_revoked),
-                ("error.already_enabled", &lang.error.already_enabled),
-                ("error.already_disabled", &lang.error.already_disabled),
-                ("error.retry_later", &lang.error.retry_later),
-                ("cmd.start", &lang.cmd.start),
-                ("cmd.help", &lang.cmd.help),
-                ("cmd.enable", &lang.cmd.enable),
-                ("cmd.disable", &lang.cmd.disable),
-            ] {
-                assert!(!s.is_empty(), "{code}: {field} is empty");
-            }
+        for (code, json) in EMBEDDED {
+            let value: serde_json::Value = serde_json::from_str(json).expect("catalog parses");
+            walk(code, "", &value);
         }
     }
 

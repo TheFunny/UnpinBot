@@ -157,25 +157,15 @@ fn build_handler(
     // (official teloxide pattern).
     let command_branch = Update::filter_message()
         .filter_map(move |msg: Message| {
-            Some(
-                catalogs
-                    .resolve(msg.from.as_ref().and_then(|u| u.language_code.as_deref()))
-                    .clone(),
-            )
+            Some(catalogs.resolve(msg.from.as_ref().and_then(|u| u.language_code.as_deref())))
         })
         .filter_command::<commands::Command>()
         .endpoint(commands::route_command);
 
-    // Auto-unpin: derive the `is_automatic_forward` decision from the raw
-    // `Update` so no `Message` dependency is required in the predicate.
+    // Auto-unpin: `filter_message` has already produced the `Message` the
+    // predicate and the endpoint need — same shape as the migration branch.
     let unpin_branch = Update::filter_message()
-        .filter(|update: Update| {
-            matches!(&update.kind, teloxide::types::UpdateKind::Message(m) if m.is_automatic_forward())
-        })
-        .filter_map(|update: Update| match update.kind {
-            teloxide::types::UpdateKind::Message(m) => Some(m),
-            _ => None,
-        })
+        .filter(|msg: Message| msg.is_automatic_forward())
         .endpoint(unpin::auto_unpin);
 
     // A basic group upgraded to a supergroup changes its chat id; follow it,
@@ -327,8 +317,6 @@ fn listener_error_level(err: &RequestError) -> log::Level {
 }
 
 fn main() {
-    // Basic groups and supergroups are the only relevant updates; keep the
-    // unknown-lang and other config errors human-readable before tokio starts.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
