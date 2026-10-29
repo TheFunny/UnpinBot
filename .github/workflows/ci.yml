@@ -42,7 +42,7 @@ jobs:
       # current toolchain without a third-party action in the loop.
       - name: Toolchain
         run: rustup update stable && rustup component add clippy rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # `--locked` on every cargo invocation: Cargo.lock is committed and the
       # released image is built from it, so a stale lock must fail here instead
       # of being silently re-resolved — otherwise CI would test a different
